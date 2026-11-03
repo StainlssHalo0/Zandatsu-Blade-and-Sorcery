@@ -19,6 +19,10 @@ Zandatsu lets a fast edge swing cut enemies, weapons, shields and many props alo
 - Optional support for The Outer Rim lightsabers; blaster bolts do not slice enemies.
 - Experimental Nomad support with the limitations described below.
 
+## Download
+
+Ready-to-use PCVR packages are available on [GitHub Releases](https://github.com/StainlssHalo0/Zandatsu-Blade-and-Sorcery/releases). Download the `Zandatsu-x.y.z.zip` asset; compiling the source and obtaining reference DLLs are not necessary.
+
 ## Requirements for players
 
 Blade & Sorcery PCVR, U1.0+. No Harmony or BepInEx is required. Nomad is experimental.
@@ -43,9 +47,9 @@ Keep `zandatsu.shaders`: it contains both the advanced burnt-rim shader and the 
 
 - .NET SDK 8.0 or newer.
 - Internet access for the first NuGet restore of `Microsoft.NETFramework.ReferenceAssemblies` 1.0.3.
-- Your own Blade & Sorcery 1.3.2 installation, or the reference DLLs listed in [references/README.md](references/README.md).
+- Your own Blade & Sorcery 1.3.2 installation, or legitimately obtained reference DLLs listed in [references/README.md](references/README.md).
 
-Game and Unity DLLs are **not included in this repository**. They are only needed as compile-time references and must not be included in a released mod.
+Game and Unity DLLs are **not included in this repository**. They are proprietary third-party files needed only as compile-time references. Do not upload them to this repository or redistribute them without permission from the relevant rights holders. They must not be included in a released mod.
 
 ### Option A — build against an installed game
 
