@@ -1,0 +1,15 @@
+bin/
+obj/
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Game and Unity assemblies are supplied locally by each developer.
+references/*.dll
+references/*.pdb
+references/*.xml
+
+# Local packages and test output.
+*.zip
+ZandatsuLab/

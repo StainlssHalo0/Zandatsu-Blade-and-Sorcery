@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Optional test bench. Never include ZandatsuLab in a public mod release. -->
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <AssemblyName>ZandatsuLab</AssemblyName>
+    <Nullable>disable</Nullable>
+    <DebugType>portable</DebugType>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <GameDir Condition="'$(GameDir)' == '' and '$(BAS_GAME_DIR)' != ''">$(BAS_GAME_DIR)</GameDir>
+    <Managed Condition="'$(Managed)' == '' and '$(GameDir)' != ''">$(GameDir)\BladeAndSorcery_Data\Managed</Managed>
+    <Managed Condition="'$(Managed)' == ''">$(MSBuildProjectDirectory)\..\references</Managed>
+    <ModOut Condition="'$(GameDir)' != ''">$(GameDir)\BladeAndSorcery_Data\StreamingAssets\Mods\ZandatsuLab</ModOut>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="ZandatsuLab.cs" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <Reference Include="ThunderRoad"><HintPath>$(Managed)\ThunderRoad.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="ThunderRoad.MaterialInstance"><HintPath>$(Managed)\ThunderRoad.MaterialInstance.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine"><HintPath>$(Managed)\UnityEngine.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(Managed)\UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.ImageConversionModule"><HintPath>$(Managed)\UnityEngine.ImageConversionModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.PhysicsModule"><HintPath>$(Managed)\UnityEngine.PhysicsModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.ScreenCaptureModule"><HintPath>$(Managed)\UnityEngine.ScreenCaptureModule.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+  <Target Name="CopyToMods" AfterTargets="Build" Condition="'$(GameDir)' != ''">
+    <MakeDir Directories="$(ModOut)" />
+    <Copy SourceFiles="$(OutDir)ZandatsuLab.dll;manifest.json" DestinationFolder="$(ModOut)" />
+  </Target>
+</Project>

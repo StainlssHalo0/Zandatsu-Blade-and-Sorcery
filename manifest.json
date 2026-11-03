@@ -1,0 +1,8 @@
+{
+  "Name": "Zandatsu",
+  "Description": "Free-angle slicing: enemies are cut along the real plane of your sword swing, like Metal Gear Rising: Revengeance. The cut enemy stays a corpse you can cut again; lose only a limb and he fights on and bleeds out. Cut his sword and shield too. A fire-imbued blade sears the cut.",
+  "Author": "StainlessHalo (built with Claude Code)",
+  "ModVersion": "0.7.0",
+  "GameVersion": "1.0.0.0",
+  "Thumbnail": "thumbnail.png"
+}

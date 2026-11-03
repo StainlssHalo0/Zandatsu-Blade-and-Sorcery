@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <AssemblyName>Zandatsu</AssemblyName>
+    <RootNamespace>Zandatsu</RootNamespace>
+    <Nullable>disable</Nullable>
+    <DebugType>portable</DebugType>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+
+    <!-- Optional: pass -p:GameDir="C:\path\to\Blade & Sorcery" or set BAS_GAME_DIR. -->
+    <GameDir Condition="'$(GameDir)' == '' and '$(BAS_GAME_DIR)' != ''">$(BAS_GAME_DIR)</GameDir>
+    <Managed Condition="'$(Managed)' == '' and '$(GameDir)' != ''">$(GameDir)\BladeAndSorcery_Data\Managed</Managed>
+    <Managed Condition="'$(Managed)' == ''">$(MSBuildProjectDirectory)\references</Managed>
+    <ModOut Condition="'$(GameDir)' != ''">$(GameDir)\BladeAndSorcery_Data\StreamingAssets\Mods\Zandatsu</ModOut>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="src\**\*.cs" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="ThunderRoad"><HintPath>$(Managed)\ThunderRoad.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="ThunderRoad.Manikin"><HintPath>$(Managed)\ThunderRoad.Manikin.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Unity.Addressables"><HintPath>$(Managed)\Unity.Addressables.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Unity.ResourceManager"><HintPath>$(Managed)\Unity.ResourceManager.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine"><HintPath>$(Managed)\UnityEngine.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.AssetBundleModule"><HintPath>$(Managed)\UnityEngine.AssetBundleModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(Managed)\UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.ImageConversionModule"><HintPath>$(Managed)\UnityEngine.ImageConversionModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.InputLegacyModule"><HintPath>$(Managed)\UnityEngine.InputLegacyModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.PhysicsModule"><HintPath>$(Managed)\UnityEngine.PhysicsModule.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+
+  <Target Name="CheckGameReferences" BeforeTargets="ResolveReferences">
+    <Error Condition="!Exists('$(Managed)\ThunderRoad.dll')"
+           Text="Game reference DLLs were not found. Pass -p:GameDir=&quot;C:\path\to\Blade &amp; Sorcery&quot; or copy the files listed in references/README.md into the references folder." />
+  </Target>
+
+  <Target Name="CopyToMods" AfterTargets="Build" Condition="'$(GameDir)' != ''">
+    <MakeDir Directories="$(ModOut)" />
+    <Copy SourceFiles="$(OutDir)Zandatsu.dll;$(OutDir)Zandatsu.pdb;manifest.json;assets\thumbnail.png;assets\HotSteel.png;assets\BurnEdge.png;assets\zandatsu.shaders" DestinationFolder="$(ModOut)" />
+    <ItemGroup><CapTexture Include="assets\caps\*.png" /></ItemGroup>
+    <Copy SourceFiles="@(CapTexture)" DestinationFolder="$(ModOut)\caps" />
+  </Target>
+</Project>
