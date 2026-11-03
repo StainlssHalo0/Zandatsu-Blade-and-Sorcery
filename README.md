@@ -52,7 +52,7 @@ Game and Unity DLLs are **not included in this repository**. They are only neede
 From the repository root:
 
 ```bash
-dotnet build -c Release -p:GameDir="E:\SteamLibrary\steamapps\common\Blade & Sorcery"
+dotnet build -c Release -p:GameDir="C:\Games\Blade & Sorcery"
 ```
 
 Replace the example path with your own game installation. You can also set the `BAS_GAME_DIR` environment variable instead of passing `GameDir`.
@@ -124,7 +124,7 @@ The prebuilt PC bundle is `assets/zandatsu.shaders`. Rebuilding it requires the 
 Build and install it with:
 
 ```bash
-dotnet build lab/ZandatsuLab.csproj -c Release -p:GameDir="E:\SteamLibrary\steamapps\common\Blade & Sorcery"
+dotnet build lab/ZandatsuLab.csproj -c Release -p:GameDir="C:\Games\Blade & Sorcery"
 ```
 
 Example PCVR mock-HMD run:
