@@ -128,7 +128,7 @@ The prebuilt PC bundle is `assets/zandatsu.shaders`. Rebuilding it requires the 
 Build and install it with:
 
 ```bash
-dotnet build lab/ZandatsuLab.csproj -c Release -p:GameDir="C:\Games\Blade & Sorcery"
+dotnet build lab/ZandatsuLab.csproj -c Release -p:GameDir="[Disk]\SteamLibrary\steamapps\common\Blade & Sorcery"
 ```
 
 Example PCVR mock-HMD run:
