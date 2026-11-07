@@ -61,7 +61,13 @@ dotnet build -c Release -p:GameDir="C:\Games\Blade & Sorcery"
 
 Replace the example path with your own game installation. You can also set the `BAS_GAME_DIR` environment variable instead of passing `GameDir`.
 
-This builds the mod and copies the DLL, manifest, textures, shader bundle and thumbnail into:
+This builds the mod without changing the installed game. To also install the DLL, manifest, textures and shader bundle, opt in explicitly:
+
+```bash
+dotnet build -c Release -p:GameDir="C:\Games\Blade & Sorcery" -p:DeployToGame=true
+```
+
+The install destination is:
 
 ```text
 BladeAndSorcery_Data\StreamingAssets\Mods\Zandatsu

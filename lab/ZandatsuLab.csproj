@@ -11,6 +11,7 @@
     <GameDir Condition="'$(GameDir)' == '' and '$(BAS_GAME_DIR)' != ''">$(BAS_GAME_DIR)</GameDir>
     <Managed Condition="'$(Managed)' == '' and '$(GameDir)' != ''">$(GameDir)\BladeAndSorcery_Data\Managed</Managed>
     <Managed Condition="'$(Managed)' == ''">$(MSBuildProjectDirectory)\..\references</Managed>
+    <DeployToGame Condition="'$(DeployToGame)' == ''">false</DeployToGame>
     <ModOut Condition="'$(GameDir)' != ''">$(GameDir)\BladeAndSorcery_Data\StreamingAssets\Mods\ZandatsuLab</ModOut>
   </PropertyGroup>
   <ItemGroup>
@@ -24,7 +25,8 @@
     <Reference Include="UnityEngine.PhysicsModule"><HintPath>$(Managed)\UnityEngine.PhysicsModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.ScreenCaptureModule"><HintPath>$(Managed)\UnityEngine.ScreenCaptureModule.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
-  <Target Name="CopyToMods" AfterTargets="Build" Condition="'$(GameDir)' != ''">
+  <Target Name="CopyToMods" AfterTargets="Build" Condition="'$(DeployToGame)' == 'true'">
+    <Error Condition="'$(GameDir)' == ''" Text="DeployToGame requires GameDir or BAS_GAME_DIR." />
     <MakeDir Directories="$(ModOut)" />
     <Copy SourceFiles="$(OutDir)ZandatsuLab.dll;manifest.json" DestinationFolder="$(ModOut)" />
   </Target>
