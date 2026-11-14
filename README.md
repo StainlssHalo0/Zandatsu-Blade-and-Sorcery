@@ -24,8 +24,8 @@ The current source also improves tear-cap alignment and fire effects on shortene
 
 ## Download
 
-- [Zandatsu 0.8.0 for PCVR](downloads/Zandatsu-0.8.0-PCVR.zip)
-- [ZandatsuLab Grid for PCVR](downloads/ZandatsuLab-Grid-PCVR.zip), the optional test map and test bench.
+- [Zandatsu 0.8.0 for PCVR](https://github.com/StainlssHalo0/Zandatsu-Blade-and-Sorcery/releases/download/v0.8.0/Zandatsu-0.8.0-PCVR.zip)
+- [ZandatsuLab Grid for PCVR](https://github.com/StainlssHalo0/Zandatsu-Blade-and-Sorcery/releases/download/v0.8.0/ZandatsuLab-Grid-PCVR.zip), the optional test map and test bench.
 
 Extract each archive directly into `BladeAndSorcery_Data/StreamingAssets/Mods`. The archives contain the `Zandatsu` and `ZandatsuLab` folders respectively. Older packages are available on [GitHub Releases](https://github.com/StainlssHalo0/Zandatsu-Blade-and-Sorcery/releases).
 

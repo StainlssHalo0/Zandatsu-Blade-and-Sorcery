@@ -12,6 +12,4 @@ references/*.xml
 
 # Local packages and test output.
 *.zip
-!downloads/Zandatsu-*.zip
-!downloads/ZandatsuLab-*.zip
 ZandatsuLab/
