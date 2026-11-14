@@ -4,7 +4,7 @@
 
 Zandatsu lets a fast edge swing cut enemies, weapons, shields and many props along the real plane of the blade, instead of only at the game's joints. It is inspired by Blade Mode in *Metal Gear Rising: Revengeance*.
 
-- **Source version:** 0.7.0
+- **Packaged release:** 0.7.0. The current source branch includes changes made after that release.
 - **Tested game version:** Blade & Sorcery PCVR 1.3.2
 - **License:** MIT — see [LICENSE](LICENSE).
 
@@ -12,12 +12,15 @@ Zandatsu lets a fast edge swing cut enemies, weapons, shields and many props alo
 
 - Cut creatures at almost any angle, including through armour, and cut the corpse or loose pieces again.
 - Survivable limb cuts: an enemy can lose an arm or leg, keep fighting or fall, and bleed out.
+- Experimental `Tear Limbs` with `Hybrid Cuts` and vanilla dismemberment disabled. Torn limbs can be held by hand or telekinesis and cut again. Hand-tearing tests have given inconsistent results.
 - Cut weapons, shields, bows and the KharTib crossbow. Remaining weapons keep appropriate mass, balance and spell effects.
 - Cut furniture, barrels, pottery, logs, baskets, food and other props, with material-specific cut faces and hollow interiors.
 - Grab, throw and re-slice weapon and prop debris.
 - Fire-imbued blades char cut surfaces and leave a smouldering rim.
 - Optional support for The Outer Rim lightsabers; blaster bolts do not slice enemies.
 - Experimental Nomad support with the limitations described below.
+
+The current source also improves tear-cap alignment and fire effects on shortened blades. Hair and hair ties are excluded from flesh caps, and body fragments smaller than 6 cm across their bounding-box diagonal have no grab handle.
 
 ## Download
 
@@ -134,7 +137,7 @@ The prebuilt PC bundle is `assets/zandatsu.shaders`. Rebuilding it requires the 
 Build and install it with:
 
 ```bash
-dotnet build lab/ZandatsuLab.csproj -c Release -p:GameDir="[Disk]\SteamLibrary\steamapps\common\Blade & Sorcery"
+dotnet build lab/ZandatsuLab.csproj -c Release -p:GameDir="C:\Games\Blade & Sorcery" -p:DeployToGame=true
 ```
 
 Example PCVR mock-HMD run:
@@ -160,7 +163,7 @@ Zandatsu.csproj      Portable build project
 ## Credits and third-party notices
 
 - Idea, in-game testing, HotSteel texture and AI-generated BurnEdge texture: **StainlessHalo**.
-- Code written with **Claude Code** (Anthropic, Claude Opus) and **Kimi** (Moonshot AI).
+- Code written with **Claude Code** (Anthropic, Claude Opus), **Kimi** (Moonshot AI) and **Codex** (OpenAI).
 - Inspired by *Metal Gear Rising: Revengeance* (PlatinumGames / Konami); not affiliated with them.
 - Blade & Sorcery and ThunderRoad are property of their respective owners. No game assemblies or extracted game assets are included.
 - The mod uses the game's own materials, effects and sounds at runtime.

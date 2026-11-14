@@ -106,6 +106,9 @@ namespace Zandatsu
         [ModOption("Debug Key F9", "F9 (desktop keyboard) cuts the nearest enemy with a random plane", order = 25, category = Cat, defaultValueIndex = 0)]
         public static bool DebugKey = false;
 
+        [ModOption("Tear Limbs", "Use the game's joint break for Rip and Tear and two-handed grabs, with detachable Zandatsu limbs and Hybrid Cuts", order = 26, category = Cat)]
+        public static bool TearLimbs = true;
+
         public static ModOptionFloat[] SpeedValues() => ModOptionFloat.CreateArray(1f, 40f, 0.5f);   // index 12 = 7 m/s default; damage curves top out at 20, fast wrist flicks reach 30+
         public static ModOptionFloat[] SeparationValues() => ModOptionFloat.CreateArray(0f, 5f, 0.5f);
         public static ModOptionInt[] MaxPieceValues() => ModOptionInt.CreateArray(10, 200, 10);
@@ -146,6 +149,7 @@ namespace Zandatsu
             public RagdollPart hitPart;
             public Item item;
             public float fire;   // fire charge on the blade, 0..1
+            public bool tear;
         }
 
         private readonly List<PendingCut> pending = new List<PendingCut>();
@@ -162,6 +166,7 @@ namespace Zandatsu
         private readonly Dictionary<Damager, Vector3[]> lastBlade = new Dictionary<Damager, Vector3[]>();
         private readonly Collider[] overlap = new Collider[512];   // room for a pile of pieces around what the blade hits
         private readonly PieceGrab grab = new PieceGrab();
+        private readonly TearJoints tearJoints = new TearJoints();
 
         public override void ScriptEnable()
         {
@@ -192,6 +197,8 @@ namespace Zandatsu
             EventManager.onRagdollSliced -= OnRagdollSliced;
             EventManager.onLevelLoad -= OnLevelLoadSelfTest;   // subscribed only with -zandatsutest; harmless otherwise
             LogFilter.Uninstall();
+            tearJoints.Clear();
+            EndVetoes();
             Damager.dismembermentEnabled = GoreAllowed;
             ClearPieces();
             HybridState.ClearAll();
@@ -206,6 +213,8 @@ namespace Zandatsu
         private void OnLevelUnload(LevelData levelData, LevelData.Mode mode, EventTime eventTime)
         {
             if (eventTime != EventTime.OnStart) return;
+            tearJoints.Clear();
+            EndVetoes();
             ClearPieces();
             HybridState.ClearAll();
             Survival.ClearAll();
@@ -221,6 +230,8 @@ namespace Zandatsu
         private void OnCreatureDespawn(Creature creature, EventTime eventTime)
         {
             if (eventTime != EventTime.OnStart) return;
+            tearJoints.Clear(creature);
+            RepairTornJoints(creature);
             try { HybridState.OnDespawn(creature); }
             catch (Exception e) { Debug.LogError("[Zandatsu] restoring hybrid-cut creature: " + e); }
             try { Survival.OnDespawn(creature); }
@@ -283,9 +294,8 @@ namespace Zandatsu
 
         public override void ScriptUpdate()
         {
-            // The game's joint slicing: off while Zandatsu cuts (Options.Apply re-enables it), else as the game's own gore
-            // setting says (a value saved when the mod started went stale when the player changed that setting later).
-            Damager.dismembermentEnabled = GoreAllowed && (VanillaDismemberment || !Enabled);
+            bool gore = GoreAllowed;
+            Damager.dismembermentEnabled = gore && (VanillaDismemberment || !Enabled);
 
             if (DebugKey && Input.GetKeyDown(KeyCode.F9)) DebugCutNearest();
             HotSteel.Update();
@@ -295,6 +305,9 @@ namespace Zandatsu
             HybridState.KeepSeveredStill();
             Survival.Update();
             EndVetoes();
+            Creature pulling = gore && Enabled && TearLimbs && HybridCuts && !VanillaDismemberment && Player.local
+                ? Player.local.creature : null;
+            tearJoints.Update(pulling, claimed);
             if (Enabled) Prewarm();
             if (Enabled && GrabPieces) grab.Update();
             else grab.ReleaseAll();
@@ -343,6 +356,7 @@ namespace Zandatsu
             public int generation;
             public Item cutter;
             public float fire;             // fire charge on the cutting blade (smoke after the cut)
+            public bool tear;
             public Material burn;          // burnt rim of a fire cut (its distance field is made a texture when done)
             public List<Item> dropped;    // weapons the cut creature was holding
             public List<SkinnedMeshRenderer> sources;   // hybrid cut: the creature renderers the snapshot was baked from
@@ -430,6 +444,12 @@ namespace Zandatsu
             if (HybridCuts && creature.ragdoll && creature.ragdoll.rootPart && !VanillaSliced(creature))
                 for (int i = 0; i < skel.bodies.Count; i++)
                     if (skel.bodies[i].live == creature.ragdoll.rootPart.transform) { rootBody = i; break; }
+            int hitBody = cut.hitPart ? skel.bodies.FindIndex(body => body.live == cut.hitPart.transform) : -1;
+            if (cut.tear && (hitBody < 0 || rootBody < 0))
+            {
+                claimed.Remove(creature);
+                return;
+            }
             CreatureSnapshot snap = SnapCreature(creature, meshBoneToBody, skel, rootBody >= 0, out HashSet<Material> metalSrc,
                                                  out List<SkinnedMeshRenderer> sources, out (int verts, int tris)[] sourceCounts);
             float tBake = Time.realtimeSinceStartup;
@@ -454,6 +474,7 @@ namespace Zandatsu
             var job = new CutJob
             {
                 fire = cut.fire,
+                tear = cut.tear,
                 burn = burn,
                 creature = creature,
                 skeleton = skel,
@@ -477,10 +498,7 @@ namespace Zandatsu
             };
             Vector3 point = cut.point, normal = cut.normal;
             BurnField burnField = FireCut.FieldOf(burn);
-            int hitBody = -1;
-            if (cut.hitPart)
-                for (int i = 0; i < skel.bodies.Count; i++)
-                    if (skel.bodies[i].live == cut.hitPart.transform) { hitBody = i; break; }
+            bool tear = cut.tear;
             job.task = Task.Run(() =>
             {
                 // The vertices are skinned here, off the main thread, from the bone matrices frozen above.
@@ -488,7 +506,7 @@ namespace Zandatsu
                 MeshData world = snap.Build();
                 float skinMs = (float)clock.Elapsed.TotalMilliseconds;
                 CutResult r = CutWork.SliceAndPrepare(world, skel, point, normal, capFill, hitBody, metal, steel,
-                                                      rootBody, rootBody >= 0 ? sourceCounts : null, burn, burnField);
+                                                      rootBody, rootBody >= 0 ? sourceCounts : null, burn, burnField, tear, family.hair);
                 MeshData.Return(world);   // sliced: nothing refers to the snapshot any more
                 if (r != null)
                 {
@@ -600,6 +618,11 @@ namespace Zandatsu
                     }
                     map[m] = copy;
                     if (metalSrc != null && metalSrc.Contains(m)) family.metal.Add(copy);
+                    string materialName = m.name;
+                    int suffix = materialName.IndexOf(" (", StringComparison.Ordinal);
+                    if (suffix >= 0) materialName = materialName.Substring(0, suffix);
+                    if (materialName == "Human_Hair" || materialName == "Hair Band" || materialName == "Hair Ring")
+                        family.hair.Add(copy);
                 }
                 return copy;
             }
@@ -730,7 +753,8 @@ namespace Zandatsu
                 bladeVelocity = job.bladeVelocity,
                 separationSpeed = SeparationSpeed,
                 cutter = job.cutter,
-                seared = Seared(job)
+                seared = Seared(job),
+                tornLimb = job.tear || job.source && job.source.GetComponent<TornLimb>()
             };
             int bodies = 0, colliders = 0;
             SlicedPiece first = null;
@@ -779,6 +803,11 @@ namespace Zandatsu
                 if (ctx.seared) capEffect = null;   // the wound is seared shut: smoke and sizzle instead of blood
                 string kept = Hybrid.Apply(creature, r.creature, job.sources, job.skeleton, job.meshBoneToBody, r.pieceBodyVerts, job.fill, job.steel,
                                            capEffect, job.point, job.normal);
+                if (job.tear && first)
+                {
+                    try { first.GetComponent<TornLimb>()?.TransferGrips(); }
+                    catch (Exception e) { Debug.LogWarning("[Zandatsu] transferring torn limb grips: " + e.Message); }
+                }
                 var creatureColliders = new List<Collider>();
                 foreach (RagdollPart part in creature.ragdoll.parts)
                     if (part && part.colliderGroup && part.colliderGroup.colliders != null)
@@ -1180,11 +1209,12 @@ namespace Zandatsu
         // did the same. So: no joint slicing on our creatures, and creatures the game sliced are cut into loose pieces.
 
         private readonly List<RagdollPart> vetoed = new List<RagdollPart>();
+        private readonly HashSet<RagdollPart> tornJoints = new HashSet<RagdollPart>();
         private bool vetoLogged;
 
         private void OnRagdollSliced(RagdollPart part, EventTime eventTime)
         {
-            if (eventTime != EventTime.OnStart || !part || part.isSliced || !part.ragdoll) return;
+            if (eventTime != EventTime.OnStart || !part || !part.ragdoll || part.isSliced && !vetoed.Contains(part)) return;
             Creature creature = part.ragdoll.creature;
             bool palm = PalmChop(creature);
             // Also while our cut of it is still being worked out: a skill slicing it in those few frames (the lightning
@@ -1192,14 +1222,97 @@ namespace Zandatsu
             // creature: spells and Shard Striker split at the joints past Damager.dismembermentEnabled, and a head split off
             // that way left every later creature from the pool with only a stump of the head's skin (the game's own error).
             bool ours = HybridState.Has(creature) || claimed.Contains(creature);
-            if (!palm && !ours && (VanillaDismemberment || !Enabled)) return;
+            RagdollPart broken = !palm && (ours || Enabled && (TearLimbs && HybridCuts || !VanillaDismemberment))
+                ? BrokenJoint(part) : null;
+            bool tear = broken && Enabled && TearLimbs && HybridCuts && GoreAllowed && creature && !creature.isPlayer &&
+                        (Survival.IsLimb(part.type) || part.type == RagdollPart.Type.Head) && !VanillaSliced(creature);
+            if (!palm && !ours && !tear && (VanillaDismemberment || !Enabled)) return;
+            if (broken)
+            {
+                tornJoints.Add(broken);
+                if (tear && !claimed.Contains(creature)) StartTear(part, creature);
+            }
             // Ragdoll.TrySlice gives up on a part already sliced, checked right after this event; set back next frame.
-            part.isSliced = true;
-            vetoed.Add(part);
-            if (palm || vetoLogged) return;
+            if (!part.isSliced)
+            {
+                part.isSliced = true;
+                vetoed.Add(part);
+            }
+            if (palm || tear || vetoLogged) return;
             vetoLogged = true;
             Debug.Log("[Zandatsu] the game's joint slicing on " + creature.name + " (" + part.name + ") skipped: " +
                       (ours ? "it was cut by Zandatsu" : "Vanilla Dismemberment is off"));
+        }
+
+        private static RagdollPart BrokenJoint(RagdollPart part)
+        {
+            RagdollPart parent = part.parentPart;
+            bool arm = IsBreakable(part);
+            bool redirects = parent && parent.sliceChildAndDisableSelf == part && IsBreakable(parent);
+            if (!arm && !redirects) return null;
+            // An armed joint can also be struck by a sword. Only Unity's break callback takes the tear path.
+            var trace = new System.Diagnostics.StackTrace(false);
+            for (int i = 0; i < trace.FrameCount; i++)
+            {
+                var method = trace.GetFrame(i).GetMethod();
+                if (method?.DeclaringType != typeof(RagdollPart) || method.Name != "OnJointBreak") continue;
+                return redirects ? parent : part;
+            }
+            return null;
+        }
+
+        private static bool IsBreakable(RagdollPart part) =>
+            part.ripBreak && (!part.characterJoint || !float.IsInfinity(part.characterJoint.breakForce));
+
+        private void StartTear(RagdollPart part, Creature creature)
+        {
+            if (!part.parentPart || part.physicBody == null || part.parentPart.physicBody == null || HybridState.IsSevered(creature, part)) return;
+            Vector3 origin = part.transform.position;
+            Vector3 axis = origin - part.parentPart.transform.position;
+            foreach (RagdollPart child in creature.ragdoll.parts)
+                if (child && child.parentPart == part && !HybridState.IsSevered(creature, child) &&
+                    (child.transform.position - origin).sqrMagnitude > 0.0025f)
+                {
+                    axis = child.transform.position - origin;
+                    break;
+                }
+            if (axis.sqrMagnitude < 0.0001f) return;
+
+            Vector3 pull = part.physicBody.velocity - part.parentPart.physicBody.velocity;
+            Vector3 normal = axis.normalized;
+            if (Vector3.Dot(normal, pull) > 0.1f) normal = Vector3.RotateTowards(normal, pull.normalized, 15f * Mathf.Deg2Rad, 0f);
+            claimed.Add(creature);
+            try
+            {
+                // Snapshot in the physics callback, before the hand can pull the freed bone away from the stump.
+                StartCreatureCut(new PendingCut
+                {
+                    creature = creature, hitPart = part, tear = true, normal = normal,
+                    point = origin + axis.normalized * Mathf.Min(0.05f, axis.magnitude * 0.25f), bladeVelocity = pull
+                });
+                Debug.Log($"[Zandatsu] torn at the joint: {creature.name}, {part.name}");
+            }
+            catch (Exception e)
+            {
+                claimed.Remove(creature);
+                Debug.LogError("[Zandatsu] tear snapshot: " + e);
+            }
+        }
+
+        private void RepairTornJoints(Creature only = null)
+        {
+            tornJoints.RemoveWhere(part =>
+            {
+                if (!part || !part.ragdoll) return true;
+                if (only && part.ragdoll.creature != only) return false;
+                if (!part.characterJoint && !HybridState.IsSevered(part.ragdoll.creature, part))
+                {
+                    // The part's stump may stay attached, even when the distal side has flown off.
+                    part.CreateCharJoint(false);
+                    part.ResetCharJointBreakForce();
+                }
+                return true;
+            });
         }
 
         // Martial Protege (SkillBruteForce): an open-palm chop that passes its checks slices the hit limb off at the joint
@@ -1257,10 +1370,10 @@ namespace Zandatsu
 
         private void EndVetoes()
         {
-            if (vetoed.Count == 0) return;
             foreach (RagdollPart part in vetoed)
                 if (part && !HybridState.IsSevered(part.ragdoll ? part.ragdoll.creature : null, part)) part.isSliced = false;
             vetoed.Clear();
+            if (tornJoints.Count > 0) RepairTornJoints();
         }
 
         /// <summary>
@@ -1639,8 +1752,9 @@ namespace Zandatsu
                 prepMs = (Time.realtimeSinceStartup - t0) * 1000f
             };
             BurnField burnField = FireCut.FieldOf(burn);
+            var hair = piece.family.hair;
             job.task = Task.Run(() => CutWork.SliceAndPrepare(data, skel, point, normal, capFill, hitBody, metal, steel, -1, null, burn,
-                                                                burnField));
+                                                                burnField, hair: hair));
             jobs.Add(job);
         }
 

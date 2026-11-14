@@ -51,7 +51,7 @@ namespace Zandatsu
         public static CutResult SliceAndPrepare(MeshData src, Skeleton skel, Vector3 point, Vector3 normal, Material fill, int hitBody,
                                                 HashSet<Material> metal = null, Material steel = null,
                                                 int rootBody = -1, (int verts, int tris)[] sourceCounts = null, Material burn = null,
-                                                BurnField burnField = null)
+                                                BurnField burnField = null, bool tear = false, HashSet<Material> hair = null)
         {
             var sw = Stopwatch.StartNew();
             int weightCount = src.w.Count;
@@ -62,21 +62,40 @@ namespace Zandatsu
             // The source is no longer sanitized before slicing: in every test it found nothing to fix (n0/t0/o0) and it
             // cost a full pass over 40-50k vertices. The pieces still are.
             var fixedSource = (0, 0, 0);
-            sbyte[] forced = ForcedSides(src, skel, point, normal, hitBody, out string cutBodies, out sbyte[] bodySide);
+            string cutBodies;
+            sbyte[] bodySide = null;
+            sbyte[] forced = tear ? TearSides(src, skel, hitBody, out cutBodies, out bodySide)
+                                 : ForcedSides(src, skel, point, normal, hitBody, out cutBodies, out bodySide);
             double tPrep = sw.Elapsed.TotalMilliseconds;
             if (!MeshSlicer.Slice(src, point, normal, fill, out MeshData a, out MeshData b, forced, metal, steel,
-                                  VolumeShape.FromSkeleton(skel), burn, burnField)) return null;
+                                  VolumeShape.FromSkeleton(skel), burn, burnField, clipForcedSeams: tear, hair: hair)) return null;
             double tSlice = sw.Elapsed.TotalMilliseconds;
             string sliceDetail = MeshSlicer.LastDetail;
+
+            if (tear)
+            {
+                // Seam triangles can carry torso weights. The detached side must still contain only limb bodies.
+                var limbBodies = new int[bodySide.Length];
+                for (int i = 0; i < bodySide.Length; i++) limbBodies[i] = bodySide[i] < 0 ? -1 : i;
+                for (int i = 0; i < a.VertexCount; i++)
+                    a.w[i] = Weights.Remap(a.w[i], limbBodies, out BoneWeight weight) ? weight : Weights.Single(hitBody);
+            }
 
             var r = new CutResult { posVerts = a.VertexCount, negVerts = b.VertexCount, cutBodies = cutBodies, fixedSource = fixedSource };
             // Both sides split at once (the worker has the cores to itself; a cut used to wait for each step in turn).
             var chunks = new List<KeyValuePair<MeshData, int>>();
             int keptApartA = 0, keptApartB = 0;
             List<MeshData> splitA = null, splitB = null;
-            Parallel.Invoke(
-                () => splitA = SplitComponents(a, Detached(skel, point, normal, bodySide, +1), ref keptApartA),
-                () => splitB = SplitComponents(b, Detached(skel, point, normal, bodySide, -1), ref keptApartB));
+            if (tear)
+            {
+                // Detached armour is still part of the limb, and everything on the stump side stays with the NPC.
+                splitA = new List<MeshData> { a };
+                splitB = new List<MeshData> { b };
+            }
+            else
+                Parallel.Invoke(
+                    () => splitA = SplitComponents(a, Detached(skel, point, normal, bodySide, +1), ref keptApartA),
+                    () => splitB = SplitComponents(b, Detached(skel, point, normal, bodySide, -1), ref keptApartB));
             int keptApart = keptApartA + keptApartB;
             foreach (MeshData g in splitA) chunks.Add(new KeyValuePair<MeshData, int>(g, +1));
             foreach (MeshData g in splitB) chunks.Add(new KeyValuePair<MeshData, int>(g, -1));
@@ -91,7 +110,8 @@ namespace Zandatsu
             {
                 // The chunk with most of the root body stays the creature; everything else flies off.
                 int best = 0;
-                for (int c = 0; c < chunks.Count; c++)
+                if (tear) keep = 1;
+                for (int c = 0; !tear && c < chunks.Count; c++)
                 {
                     int count = 0;
                     foreach (BoneWeight bw in chunks[c].Key.w) if (bw.boneIndex0 == rootBody) count++;
@@ -114,7 +134,7 @@ namespace Zandatsu
             {
                 if (c == keep)
                 {
-                    r.creature = CreatureRecipe.Build(chunks[c].Key, chunks[c].Value, sourceCounts, bodyCount, fill);
+                    r.creature = CreatureRecipe.Build(chunks[c].Key, chunks[c].Value, sourceCounts, bodyCount, fill, tear);
                     return;
                 }
                 PieceSpec p = MakePiece(chunks[c].Key, skel, fill, chunks[c].Value);
@@ -183,6 +203,28 @@ namespace Zandatsu
         }
 
         // ---------- which bodies get cut ----------
+
+        /// <summary>Cut only the torn body. Its descendants leave with the limb and the rest stays with the creature.</summary>
+        private static sbyte[] TearSides(MeshData mesh, Skeleton skeleton, int hitBody, out string cutBodies, out sbyte[] bodySide)
+        {
+            cutBodies = skeleton.bodies[hitBody].name;
+            var side = bodySide = new sbyte[skeleton.bodies.Count];
+            for (int body = 0; body < side.Length; body++)
+            {
+                if (body == hitBody) continue;
+                side[body] = -1;
+                for (int parent = skeleton.bodies[body].parent, depth = 0; parent >= 0 && depth < side.Length;
+                     parent = skeleton.bodies[parent].parent, depth++)
+                    if (parent == hitBody) { side[body] = 1; break; }
+            }
+            var forced = new sbyte[mesh.VertexCount];
+            for (int i = 0; i < forced.Length; i++)
+            {
+                int body = mesh.w[i].boneIndex0;
+                forced[i] = body >= 0 && body < side.Length ? side[body] : (sbyte)-1;
+            }
+            return forced;
+        }
 
         /// <summary>
         /// The plane is infinite, the blade is not: cutting off a hand must not also slice the torso and the other hand

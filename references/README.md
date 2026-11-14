@@ -24,7 +24,9 @@ UnityEngine.AssetBundleModule.dll
 UnityEngine.CoreModule.dll
 UnityEngine.ImageConversionModule.dll
 UnityEngine.InputLegacyModule.dll
+UnityEngine.ParticleSystemModule.dll
 UnityEngine.PhysicsModule.dll
+UnityEngine.VFXModule.dll
 ```
 
 ## Additionally required for the optional ZandatsuLab test bench

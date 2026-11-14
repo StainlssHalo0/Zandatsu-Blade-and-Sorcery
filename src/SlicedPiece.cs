@@ -16,6 +16,7 @@ namespace Zandatsu
         public readonly List<SlicedPiece> pieces = new List<SlicedPiece>();
         public readonly List<Object> owned = new List<Object>();
         public readonly HashSet<Material> metal = new HashSet<Material>();   // metal armour materials + hot steel
+        public readonly HashSet<Material> hair = new HashSet<Material>();
         public PhysicMaterial defaultPhysicMaterial;
         public int pendingCuts;
         // Colliders of creature parts this family was cut out of (hybrid cut): still full size on the corpse, so they
@@ -148,6 +149,7 @@ namespace Zandatsu
         public JointSpec joint;
         public List<ShapeSpec> shapes;
         public Rigidbody rb;
+        public Handle nativeHandle;
     }
 
     /// <summary>Everything a piece needs from the cut that made it.</summary>
@@ -165,6 +167,7 @@ namespace Zandatsu
         public bool lightingLogged;     // lighting diagnostics once per cut
         public Item cutter;             // blade that made this cut (no second cut by it in the same swing)
         public bool seared;             // a hot blade (fire, lightsaber) cut: no blood, the fire effect sizzles instead
+        public bool tornLimb;
     }
 
     /// <summary>
@@ -204,6 +207,7 @@ namespace Zandatsu
         private bool dead;
 
         public bool IsDead => dead;
+        public bool CanGrab => size >= 0.06f; // diagonal of the piece's mesh bounds, in metres
 
         public float Mass
         {
@@ -479,6 +483,7 @@ namespace Zandatsu
                 piece.AttachBlood(effect, bones[k], capNow, delta * (-ctx.normal * spec.side));
             }
 
+            if (ctx.tornLimb && piece.CanGrab) go.AddComponent<TornLimb>().Build(piece, spec, skel);
             ctx.family.pieces.Add(piece);
             all.Add(piece);
             return piece;
@@ -710,6 +715,8 @@ namespace Zandatsu
             // Out of the live list now, not in OnDestroy at the end of the frame: the piece limit counts this list and
             // looped forever on a piece that was already dying (the game froze while slicing pieces fast).
             all.Remove(this);
+            try { GetComponent<TornLimb>()?.ReleaseGrips(); }
+            catch (System.Exception e) { Debug.LogWarning("[Zandatsu] releasing torn limb grips: " + e.Message); }
             foreach (EffectInstance ei in effects)
             {
                 try { ei?.Despawn(); } catch { }

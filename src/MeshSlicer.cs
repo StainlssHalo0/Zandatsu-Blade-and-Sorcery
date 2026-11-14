@@ -754,11 +754,13 @@ namespace Zandatsu
 
         public static bool Slice(MeshData src, Vector3 point, Vector3 normal, Material fill, out MeshData pos, out MeshData neg,
             sbyte[] forced = null, HashSet<Material> metal = null, Material steel = null, List<VolumeShape>[] volumes = null,
-            Material burn = null, BurnField burnField = null, bool holes = false, float hollow = 0f, Material inside = null)
+            Material burn = null, BurnField burnField = null, bool holes = false, float hollow = 0f, Material inside = null,
+            bool clipForcedSeams = false, HashSet<Material> hair = null)
         {
             pos = null;
             neg = null;
             LastDetail = "";
+            capShape = "0 outlines";
             var clock = System.Diagnostics.Stopwatch.StartNew();
             int vc = src.v.Count;
             if (vc == 0) return false;
@@ -770,6 +772,10 @@ namespace Zandatsu
             for (int i = 0; i < vc; i++)
             {
                 d[i] = Vector3.Dot(src.v[i] - point, normal);
+                // A tear follows the limb boundary where it meets an untouched body. Clip the mixed triangles there too,
+                // so their intersection edges become part of the cap instead of leaving a gap in its outline.
+                if (clipForcedSeams && forced != null && forced[i] != 0)
+                    d[i] = forced[i] * Mathf.Max(1e-6f, Mathf.Abs(d[i]));
                 isPos[i] = forced != null && forced[i] != 0 ? forced[i] > 0 : d[i] >= 0f;
                 if (isPos[i]) posCount++;
             }
@@ -786,8 +792,9 @@ namespace Zandatsu
             List<List<int>> groups = SubmeshGroups(src, out _);
             if (groups.Count == 0) return false;
             var parts = new Part[groups.Count];
+            sbyte[] keepWhole = clipForcedSeams ? null : forced;
             System.Threading.Tasks.Parallel.For(0, groups.Count, g =>
-                parts[g] = PlanGroup(src, groups[g], d, isPos, forced, metal, steel, mapPos, mapNeg));
+                parts[g] = PlanGroup(src, groups[g], d, isPos, keepWhole, metal, steel, hair, mapPos, mapNeg));
 
             double tGroups = clock.Elapsed.TotalMilliseconds;
             var offPos = new int[parts.Length];
@@ -828,6 +835,7 @@ namespace Zandatsu
             VertexBuffers.Return(bufNeg);
             var segs = new List<Seg>(512);
             var metalSegs = new List<Seg>();
+            int hairEdges = 0;
             for (int g = 0; g < parts.Length; g++)
             {
                 Part part = parts[g];
@@ -839,6 +847,7 @@ namespace Zandatsu
                 }
                 segs.AddRange(part.segs);
                 metalSegs.AddRange(part.metalSegs);
+                hairEdges += part.hairEdges;
             }
 
             if (pos.TriangleCount == 0 || neg.TriangleCount == 0)
@@ -868,6 +877,7 @@ namespace Zandatsu
             double tFill = clock.Elapsed.TotalMilliseconds;
             if (fleshSegs != null) BuildBurnCap(fleshSegs, normal, burn, pos, neg, burnField, fillRegions);
             LastDetail = $"tris {tTris:0.0} (classify {tClassify:0.0}, {groups.Count} groups {tGroups - tClassify:0.0}, join {tTris - tGroups:0.0}), caps {tCaps - tTris:0.0} ({capShape}), rings {tRings - tCaps:0.0}, fill {tFill - tRings:0.0}" + (fleshSegs != null ? $", burn {clock.Elapsed.TotalMilliseconds - tFill:0.0}" : "");
+            if (hairEdges > 0) LastDetail += $", hair edges skipped {hairEdges}";
             return true;
         }
 
@@ -880,6 +890,7 @@ namespace Zandatsu
             public readonly List<int> posOrder = new List<int>(), negOrder = new List<int>();
             public readonly List<Lerp> lerps = new List<Lerp>();
             public readonly List<Seg> segs = new List<Seg>(), metalSegs = new List<Seg>();
+            public int hairEdges;
             public readonly List<int> subIndex = new List<int>();   // source submesh of lp[k] / ln[k]
             public readonly List<List<int>> lp = new List<List<int>>(), ln = new List<List<int>>();
         }
@@ -963,7 +974,7 @@ namespace Zandatsu
         /// Every decision is the one slicing made before; only the vertex data is written later (Write).
         /// </summary>
         private static Part PlanGroup(MeshData src, List<int> group, float[] d, bool[] isPos, sbyte[] forced,
-            HashSet<Material> metal, Material steel, int[] mapPos, int[] mapNeg)
+            HashSet<Material> metal, Material steel, HashSet<Material> hair, int[] mapPos, int[] mapNeg)
         {
             var part = new Part();
             List<int> pos = part.posOrder, neg = part.negOrder;
@@ -972,6 +983,7 @@ namespace Zandatsu
             {
                 List<int> tris = src.subs[s];
                 bool isMetal = !ReferenceEquals(steel, null) && metal != null && metal.Contains(src.mats[s]);
+                bool isHair = hair != null && hair.Contains(src.mats[s]);
                 var lp = new List<int>(tris.Count);
                 var ln = new List<int>(tris.Count / 2);
                 for (int k = 0; k + 2 < tris.Count; k += 3)
@@ -1030,6 +1042,11 @@ namespace Zandatsu
                     listOther.Add(xyO); listOther.Add(yO); listOther.Add(zO);
                     listOther.Add(xyO); listOther.Add(zO); listOther.Add(xzO);
 
+                    if (isHair)
+                    {
+                        part.hairEdges++;
+                        continue;
+                    }
                     (isMetal ? metalSegs : segs).Add(new Seg
                     {
                         a = Vector3.LerpUnclamped(src.v[x], src.v[y], txy),

@@ -5,9 +5,7 @@ using UnityEngine;
 namespace Zandatsu
 {
     /// <summary>
-    /// Lets the player pick pieces up: pieces of enemies and the cut-off halves of weapons and objects (ItemDebris). They
-    /// are not Items and have no Handles, so the game's own grab ignores them, and its climb grip only lets the player
-    /// hang off them. Gripping near one joins its nearest body to the hand.
+    /// Lets the player pick up loose pieces without native handles. Gripping near one joins its nearest body to the hand.
     /// </summary>
     public class PieceGrab
     {
@@ -51,7 +49,8 @@ namespace Zandatsu
                     if (Climbed(rh, out PieceBody body, out ItemDebris debris))
                     {
                         rh.climb.UnGrip();
-                        Grab(i, rh, body, debris);
+                        if (body && body.nativeHandle && body.nativeHandle.CanTouch(rh)) rh.Grab(body.nativeHandle, false);
+                        else Grab(i, rh, body, debris);
                     }
                     else if (!wasPressed[i]) TryGrab(i, rh);
                 }
@@ -94,7 +93,7 @@ namespace Zandatsu
                 if (!c) continue;
                 PieceBody pb = c.GetComponentInParent<PieceBody>();
                 ItemDebris db = pb ? null : c.GetComponentInParent<ItemDebris>();
-                if (pb && (!pb.piece || pb.piece.IsDead || !pb.rb)) continue;
+                if (pb && (!pb.piece || pb.piece.IsDead || !pb.piece.CanGrab || !pb.rb || pb.nativeHandle)) continue;
                 if (!pb && (!db || !db.Body)) continue;
                 float d = (c.ClosestPoint(p) - p).sqrMagnitude;
                 if (d < bestDist) { bestDist = d; bestBody = pb; bestDebris = db; }
@@ -104,6 +103,7 @@ namespace Zandatsu
 
         private void Grab(int i, RagdollHand rh, PieceBody body, ItemDebris debris)
         {
+            if (body && (!body.piece || !body.piece.CanGrab)) return;
             Rigidbody handRb = rh.physicBody != null ? rh.physicBody.rigidBody : null;
             Rigidbody rb = body ? body.rb : debris ? debris.Body : null;
             if (!handRb || !rb) return;

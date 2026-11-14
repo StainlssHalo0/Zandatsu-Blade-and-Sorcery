@@ -711,23 +711,7 @@ namespace Zandatsu
                 }
             }
 
-            // 1b. Imbue shapes: what is left of them, so spell effects only cover the blade that is still there.
-            if (job.imbueCut)
-            {
-                MeshData imbueKept = job.keptSign > 0 ? job.imbuePos : job.imbueNeg;
-                for (int r = 0; r < job.imbueTargets.Count; r++)
-                {
-                    Renderer rend = job.imbueTargets[r];
-                    MeshFilter mf = rend ? rend.GetComponent<MeshFilter>() : null;
-                    if (!mf || mf.sharedMesh != job.imbueMeshes[r]) continue;
-                    Mesh mesh = Extract(imbueKept, sub => sub >= 0 && VertexOrigin.TagRenderer(sub) == r, sub => VertexOrigin.TagSubmesh(sub),
-                        job.imbueSubCounts[r], job.imbueToItem[r].inverse, rend.name + " (Zandatsu)", out _);
-                    if (!mesh) continue;
-                    if (!state.originalMeshes.ContainsKey(mf)) state.originalMeshes[mf] = mf.sharedMesh;
-                    state.owned.Add(mesh);
-                    mf.sharedMesh = mesh;
-                }
-            }
+            int imbueShapes = FitImbueShapes(job, state, kept);
 
             // 2. The kept cut face, on the item, red-hot and cooling.
             Mesh capMesh = Extract(kept, sub => sub < 0, null, 0, Matrix4x4.identity, "Zandatsu_WeaponCut", out _, out Material[] capMats);
@@ -888,7 +872,7 @@ namespace Zandatsu
                       $"{job.verts} verts -> kept {keptVerts}" +
                       (job.prop || job.faces.cap ? $", cut face {capMat} {job.capInfo}{broke}" : "") +
                       $"{(debris ? "" : ", no debris")}, colliders off {collOff} / shortened {collFit}, damage zones off {dmgOff} / shortened {dmgShort}, " +
-                      $"grips off {gripsOff}, mass x{keptShare:0.00}{com}, imbue shapes {(job.imbueCut ? job.imbueTargets.Count : 0)}, " +
+                      $"grips off {gripsOff}, mass x{keptShare:0.00}{com}, imbue shapes {imbueShapes}, " +
                       $"spell effects reshaped {effects}; main prep {job.prepMs:0.0} ms, worker {job.workerMs:0.0} ms ({job.detail}), " +
                       $"apply {(Time.realtimeSinceStartup - t0) * 1000f:0.0} ms");
         }
@@ -1072,7 +1056,42 @@ namespace Zandatsu
             return $", centre of mass {how}";
         }
 
-        /// <summary>A spell already burning on the weapon took its shape when it started: give it the cut shape.</summary>
+        /// <summary>Keep the spell's clipped shape, or use the retained mesh when the hidden shape cannot be clipped.</summary>
+        private static int FitImbueShapes(Job job, CutState state, MeshData kept)
+        {
+            var done = new HashSet<Renderer>();
+            int updated = 0;
+            foreach (Imbue imb in job.item.imbues)
+            {
+                ColliderGroup group = imb ? imb.colliderGroup : null;
+                if (!group) continue;
+                foreach (Renderer renderer in new[] { group.imbueEffectRenderer, group.imbueEmissionRenderer })
+                {
+                    if (!renderer || !done.Add(renderer)) continue;
+                    MeshFilter filter = renderer.GetComponent<MeshFilter>();
+                    if (!filter || (job.targets.Contains(renderer) && !renderer.forceRenderingOff)) continue;
+                    int r = job.imbueTargets.IndexOf(renderer);
+                    Mesh mesh = null;
+                    if (job.imbueCut && r >= 0 && filter.sharedMesh == job.imbueMeshes[r])
+                    {
+                        MeshData shape = job.keptSign > 0 ? job.imbuePos : job.imbueNeg;
+                        mesh = Extract(shape, tag => tag >= 0 && VertexOrigin.TagRenderer(tag) == r, VertexOrigin.TagSubmesh,
+                            job.imbueSubCounts[r], job.imbueToItem[r].inverse, renderer.name + " (Zandatsu)", out _);
+                    }
+                    if (!mesh)
+                        mesh = Extract(kept, tag => tag >= 0, null, 0, renderer.worldToLocalMatrix * job.item.transform.localToWorldMatrix,
+                            renderer.name + " (Zandatsu Imbue)", out _);
+                    if (!mesh) continue;
+                    if (!state.originalMeshes.ContainsKey(filter)) state.originalMeshes[filter] = filter.sharedMesh;
+                    state.owned.Add(mesh);
+                    filter.sharedMesh = mesh;
+                    updated++;
+                }
+            }
+            return updated;
+        }
+
+        /// <summary>Rebind active spell effects and discard the particles the old blade already emitted.</summary>
         private static int RefreshImbueEffects(Item item)
         {
             int n = 0;
@@ -1085,6 +1104,11 @@ namespace Zandatsu
                 {
                     if (cg.imbueEffectRenderer) fx.SetRenderer(cg.imbueEffectRenderer, false);
                     if (cg.imbueEmissionRenderer) fx.SetRenderer(cg.imbueEmissionRenderer, true);
+                    foreach (Effect effect in fx.effects)
+                    {
+                        if (effect is EffectParticle particles && particles.rootParticleSystem) particles.rootParticleSystem.Clear(true);
+                        else if (effect is EffectVfx visual && visual.vfx) visual.vfx.Reinit();
+                    }
                     n++;
                 }
                 catch (Exception e) { Debug.LogWarning("[Zandatsu] imbue effect: " + e.Message); }

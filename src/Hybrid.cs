@@ -21,6 +21,7 @@ namespace Zandatsu
         public Vector2[] pu0, pu1;
         public Color32[] pc;
         public Mesh preparedFrom;   // the mesh they were interpolated from (used only if the renderer still has it)
+        public Dictionary<int, (Vector3 position, Vector3 normal, Vector4 tangent)> tearEdge;
     }
 
     /// <summary>
@@ -36,11 +37,12 @@ namespace Zandatsu
         public int[] bodyVerts;         // per skeleton body: vertices the creature kept
         public Vector3 capCenter;
         public int capBody = -1;
+        public bool tear;
         public readonly Dictionary<int, ShapeSpec> fitted = new Dictionary<int, ShapeSpec>();   // body -> collider for what is left of it
 
-        public static CreatureRecipe Build(MeshData c, int side, (int verts, int tris)[] sourceCounts, int bodyCount, Material fill)
+        public static CreatureRecipe Build(MeshData c, int side, (int verts, int tris)[] sourceCounts, int bodyCount, Material fill, bool tear = false)
         {
-            var rec = new CreatureRecipe { side = side, bodyVerts = new int[bodyCount] };
+            var rec = new CreatureRecipe { side = side, tear = tear, bodyVerts = new int[bodyCount] };
             foreach (BoneWeight bw in c.w)
                 if (bw.boneIndex0 >= 0 && bw.boneIndex0 < bodyCount) rec.bodyVerts[bw.boneIndex0]++;
 
@@ -77,9 +79,9 @@ namespace Zandatsu
                 {
                     int i0 = tris[k], i1 = tris[k + 1], i2 = tris[k + 2];
                     if (c.o[i0].r != rr || c.o[i1].r != rr || c.o[i2].r != rr) continue;   // not traceable: dropped
-                    outTris.Add(Local(rp, c, map, i0, lerped));
-                    outTris.Add(Local(rp, c, map, i1, lerped));
-                    outTris.Add(Local(rp, c, map, i2, lerped));
+                    outTris.Add(Local(rp, c, map, i0, lerped, tear));
+                    outTris.Add(Local(rp, c, map, i1, lerped, tear));
+                    outTris.Add(Local(rp, c, map, i2, lerped, tear));
                 }
             }
 
@@ -110,12 +112,17 @@ namespace Zandatsu
             return rec;
         }
 
-        private static int Local(RendererRecipe rp, MeshData c, int[] map, int vi, bool[] lerped)
+        private static int Local(RendererRecipe rp, MeshData c, int[] map, int vi, bool[] lerped, bool tear)
         {
             if (map[vi] >= 0) return map[vi];
             VertexOrigin og = c.o[vi];
             if (og.b >= 0) lerped[rp.renderer] = true;
             map[vi] = rp.verts.Count;
+            if (tear && og.b >= 0)
+            {
+                if (rp.tearEdge == null) rp.tearEdge = new Dictionary<int, (Vector3, Vector3, Vector4)>();
+                rp.tearEdge.Add(map[vi], (c.v[vi], c.n[vi], c.t[vi]));
+            }
             rp.verts.Add(og);
             return map[vi];
         }
@@ -538,6 +545,8 @@ namespace Zandatsu
             }
 
             int rebuilt = 0, removed = 0, kept = 0, reskinned = 0;
+            int seam = rec.tear && rec.capBody >= 0 ? keptBody[rec.capBody] : -1;
+            SkelBody seamBody = seam >= 0 && skel.bodies[seam].live ? skel.bodies[seam] : null;
             var hiddenNames = new List<string>();
             foreach (RendererRecipe rp in rec.renderers)
             {
@@ -553,7 +562,21 @@ namespace Zandatsu
                 int[] boneRemap = SeveredBoneRemap(smr, smr.sharedMesh, meshBoneToBody, sev, keptBody, skel, out bool anySevered,
                                                    out Transform[] bones, out Matrix4x4[] bindposes);
                 if (rp.unchanged && !anySevered) { kept++; continue; }
-                Mesh mesh = Rebuild(smr.sharedMesh, rp, anySevered ? boneRemap : null, bindposes);
+                int seamBone = -1;
+                if (seamBody != null && rp.tearEdge != null)
+                {
+                    bones = bones ?? smr.bones;
+                    bindposes = bindposes ?? smr.sharedMesh.bindposes;
+                    if (bones.Length == bindposes.Length)
+                    {
+                        seamBone = bones.Length;
+                        System.Array.Resize(ref bones, seamBone + 1);
+                        System.Array.Resize(ref bindposes, seamBone + 1);
+                        bones[seamBone] = seamBody.live;
+                        bindposes[seamBone] = seamBody.bind * smr.localToWorldMatrix;
+                    }
+                }
+                Mesh mesh = Rebuild(smr.sharedMesh, rp, anySevered ? boneRemap : null, bindposes, seamBone, smr.worldToLocalMatrix);
                 if (!mesh) continue;
                 state.SetMesh(smr, mesh, bones);
                 if (rp.unchanged) reskinned++;
@@ -565,7 +588,8 @@ namespace Zandatsu
             if (rec.caps != null && rec.caps.TriangleCount > 0)
             {
                 capVerts = rec.caps.VertexCount;
-                for (int i = 0; i < rec.caps.VertexCount; i++) rec.caps.w[i] = MoveOffSevered(rec.caps.w[i], keptBody, bodyCount);
+                for (int i = 0; i < rec.caps.VertexCount; i++)
+                    rec.caps.w[i] = seamBody != null ? Weights.Single(seam) : MoveOffSevered(rec.caps.w[i], keptBody, bodyCount);
                 AddCaps(state, rec, skel, fill, steel);
             }
 
@@ -718,7 +742,7 @@ namespace Zandatsu
 
         /// <summary>The surviving part of one renderer, in its own bind space: kept vertices plus cut-edge vertices
         /// blended from the source with the same t as the world-space cut (skin weights and blend shapes too).</summary>
-        private static Mesh Rebuild(Mesh src, RendererRecipe rp, int[] boneRemap, Matrix4x4[] bindposes)
+        private static Mesh Rebuild(Mesh src, RendererRecipe rp, int[] boneRemap, Matrix4x4[] bindposes, int seamBone, Matrix4x4 worldToLocal)
         {
             if (!src) return null;
             int srcCount = src.vertexCount;
@@ -739,11 +763,32 @@ namespace Zandatsu
                 if (rp.pc != null) mesh.SetColors(rp.pc);
             }
             else SetChannels(src, mesh, rp);
-            CopySkin(src, mesh, rp, boneRemap, bindposes);
+            if (seamBone >= 0)
+            {
+                var vertices = mesh.vertices;
+                var normals = mesh.normals;
+                var tangents = mesh.tangents;
+                foreach (var edge in rp.tearEdge)
+                {
+                    int index = edge.Key;
+                    var (position, normal, tangent) = edge.Value;
+                    vertices[index] = worldToLocal.MultiplyPoint3x4(position);
+                    if (normals.Length == n) normals[index] = worldToLocal.MultiplyVector(normal).normalized;
+                    if (tangents.Length == n)
+                    {
+                        Vector3 t = worldToLocal.MultiplyVector(tangent).normalized;
+                        tangents[index] = new Vector4(t.x, t.y, t.z, tangent.w);
+                    }
+                }
+                mesh.vertices = vertices;
+                if (normals.Length == n) mesh.normals = normals;
+                if (tangents.Length == n) mesh.tangents = tangents;
+            }
+            CopySkin(src, mesh, rp, boneRemap, bindposes, seamBone);
             mesh.subMeshCount = src.subMeshCount;
             for (int s = 0; s < src.subMeshCount; s++)
                 mesh.SetTriangles(rp.subs.TryGetValue(s, out List<int> tris) ? tris : new List<int>(), s, false);
-            CopyBlendShapes(src, mesh, rp);
+            CopyBlendShapes(src, mesh, rp, seamBone);
             mesh.RecalculateBounds();
             return mesh;
         }
@@ -796,7 +841,7 @@ namespace Zandatsu
             if (cc != null) mesh.SetColors(cc);
         }
 
-        private static void CopySkin(Mesh src, Mesh dst, RendererRecipe rp, int[] boneRemap, Matrix4x4[] bindposes)
+        private static void CopySkin(Mesh src, Mesh dst, RendererRecipe rp, int[] boneRemap, Matrix4x4[] bindposes, int seamBone)
         {
             dst.bindposes = bindposes ?? src.bindposes;
             NativeArray<byte> perVertex = src.GetBonesPerVertex();
@@ -811,6 +856,12 @@ namespace Zandatsu
             var sorted = new List<KeyValuePair<int, float>>();
             for (int k = 0; k < rp.verts.Count; k++)
             {
+                if (seamBone >= 0 && rp.tearEdge.ContainsKey(k))
+                {
+                    weights.Add(new BoneWeight1 { boneIndex = seamBone, weight = 1f });
+                    counts[k] = 1;
+                    continue;
+                }
                 VertexOrigin og = rp.verts[k];
                 if (og.b < 0)
                 {
@@ -868,7 +919,7 @@ namespace Zandatsu
             }
         }
 
-        private static void CopyBlendShapes(Mesh src, Mesh dst, RendererRecipe rp)
+        private static void CopyBlendShapes(Mesh src, Mesh dst, RendererRecipe rp, int seamBone)
         {
             int count = src.vertexCount, n = rp.verts.Count;
             var dv = new Vector3[count];
@@ -886,6 +937,7 @@ namespace Zandatsu
                     src.GetBlendShapeFrameVertices(shape, f, dv, dn, dt);
                     for (int k = 0; k < n; k++)
                     {
+                        if (seamBone >= 0 && rp.tearEdge.ContainsKey(k)) continue;
                         VertexOrigin og = rp.verts[k];
                         int a = og.a, b = og.b >= 0 ? og.b : og.a;
                         float t = og.b >= 0 ? og.t : 0f;
