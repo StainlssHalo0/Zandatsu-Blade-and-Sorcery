@@ -6,6 +6,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using ThunderRoad;
+using ThunderRoad.Skill.Spell;
 using UnityEngine;
 
 namespace ZandatsuLab
@@ -53,7 +54,7 @@ namespace ZandatsuLab
 
         private static readonly string[] All =
         {
-            "swing_basic", "swing_slow", "swing_flat", "sweep_jitter", "armour", "fire", "limb", "recut_slow", "recut_fast",
+            "swing_basic", "swing_slow", "swing_flat", "sweep_jitter", "armour", "fire", "limb", "rip_tear", "recut_slow", "recut_fast",
             "cut_at_health", "pieces_again", "weapon_cut", "weapon_balance", "weapon_held", "saber", "blaster", "rd_arm",
             "prop_barrel", "prop_crate", "prop_chair", "prop_pottery", "prop_log", "prop_apple", "prop_stool", "prop_rock", "prop_skull",
             "prop_cushion", "prop_mug", "prop_cup", "prop_bowl", "prop_basket", "prop_mug2", "prop_book", "prop_target", "prop_light", "arrow",
@@ -172,7 +173,8 @@ namespace ZandatsuLab
                 ["CutWeapons"] = true, ["CutProps"] = true, ["PalmChopCuts"] = true, ["FireCutsBurn"] = true, ["HotBladeCutsEasier"] = true,
                 ["PlainBladeHeatsSteel"] = true, ["HybridCuts"] = true, ["LimbCutsNotFatal"] = true, ["BleedOutTime"] = 20f,
                 ["VanillaDismemberment"] = false, ["SlowMotionOnCut"] = false, ["CutSound"] = true, ["SeparationSpeed"] = 1f,
-                ["MaxPieces"] = 60, ["PieceLifetime"] = 120f, ["GrabPieces"] = true, ["PieceStiffness"] = 1f, ["DebugKey"] = false
+                ["MaxPieces"] = 60, ["PieceLifetime"] = 120f, ["GrabPieces"] = true, ["PieceStiffness"] = 1f, ["DebugKey"] = false,
+                ["TearLimbs"] = true
             };
             defaults = new Dictionary<FieldInfo, object>();
             foreach (var kv in declared)
@@ -297,6 +299,325 @@ namespace ZandatsuLab
             yield return Wait(7f);
             Expect("bled out", !c || c.isKilled || LogHas("bled out"), c ? $"alive {!c.isKilled}" : "gone");
             ExpectNotStretched();
+        }
+
+        private IEnumerator S_rip_tear() => RipWithGrips(true, checkPiece: true);
+
+        private IEnumerator S_hair_cap() => HairCap(false);
+        private IEnumerator S_hair_band() => HairCap(true);
+
+        private IEnumerator HairCap(bool band)
+        {
+            Creature c = null;
+            yield return Enemy(x => c = x, creatureId: "HumanFemale");
+            if (!c) yield break;
+            string hairName = band ? "Hair Band" : "Human_Hair";
+            if (band)
+            {
+                // Exercise the band material on real hair triangles that span the cut. Cover every LOD the game can select.
+                foreach (var hairRenderer in c.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+                {
+                    if (hairRenderer.name.IndexOf("Hair", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    foreach (Material m in hairRenderer.materials)
+                        if (m && m.name.StartsWith("Human_Hair", StringComparison.OrdinalIgnoreCase)) m.name = hairName;
+                }
+            }
+            yield return SwingAt(c, RagdollPart.Type.Head, 10f, false);
+            yield return Wait(1f);
+            Expect("head cut", Cuts(c) == 1 && Pieces().Count > 0, $"cuts {Cuts(c)}, pieces {Pieces().Count}");
+            Expect("hair cut but kept out of the cap", LogHas("hair edges skipped"), LastLines("hair edges skipped", 1));
+            Component piece = Pieces().FirstOrDefault(p => p.GetComponentsInChildren<SkinnedMeshRenderer>()
+                .Any(r => r.sharedMaterials.Any(m => m && m.name.StartsWith(hairName, StringComparison.OrdinalIgnoreCase))));
+            Expect("detached hair is still visible", piece, $"piece {piece}");
+            if (!piece) yield break;
+            yield return ShotTornCap(piece);
+
+            var renderer = piece.GetComponentInChildren<SkinnedMeshRenderer>();
+            int hair = Array.FindIndex(renderer.sharedMaterials, m => m && m.name.StartsWith(hairName, StringComparison.OrdinalIgnoreCase));
+            var baked = new Mesh();
+            renderer.BakeMesh(baked);
+            Vector3[] verts = baked.vertices;
+            int[] indices = baked.GetTriangles(hair);
+            var bounds = new Bounds(verts[indices[0]], Vector3.zero);
+            foreach (int index in indices) bounds.Encapsulate(verts[index]);
+            Destroy(baked);
+            var type = ZType("ZandatsuScript");
+            var script = ModManager.loadedMods.SelectMany(m => m.thunderScripts).First(s => s.GetType() == type);
+            type.GetMethod("CutPiece", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(script,
+                new object[] { piece, renderer.transform.TransformPoint(bounds.center), renderer.transform.right, Vector3.forward, null, -1, 0f });
+            yield return Wait(0.8f);
+            Expect("recut also keeps hair out of the cap", ScenarioLog().Any(l => l.msg.Contains("re-cut piece") && l.msg.Contains("hair edges skipped")),
+                   LastLines("re-cut piece", 1));
+        }
+
+        private IEnumerator S_small_grip()
+        {
+            object New(string type, params (string name, object value)[] fields)
+            {
+                object instance = Activator.CreateInstance(ZType(type));
+                foreach (var (name, value) in fields) instance.GetType().GetField(name).SetValue(instance, value);
+                return instance;
+            }
+
+            Component MakePiece(float edge, float lateral)
+            {
+                Vector3 origin = PlayerFront(2f) + Vector3.right * lateral + Vector3.up;
+                var meshType = ZType("MeshData");
+                object mesh = Activator.CreateInstance(meshType, 4, false);
+                var addVertex = meshType.GetMethod("AddVertex", new[] { typeof(Vector3), typeof(Vector3), typeof(Vector4), typeof(Vector2), typeof(BoneWeight) });
+                foreach (Vector3 offset in new[] { Vector3.zero, Vector3.right, Vector3.up, Vector3.forward })
+                    addVertex.Invoke(mesh, new object[] { origin + offset * edge, Vector3.up, new Vector4(1f, 0f, 0f, 1f), Vector2.zero,
+                                                         new BoneWeight { weight0 = 1f } });
+                meshType.GetMethod("AddTriangles").Invoke(mesh, new object[] { null, null, new List<int> { 0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3 }, -1 });
+                object skeleton = New("Skeleton");
+                var bodies = (IList)skeleton.GetType().GetField("bodies").GetValue(skeleton);
+                bodies.Add(New("SkelBody", ("name", "LabFragment"), ("pos", origin), ("rot", Quaternion.identity), ("mass", 0.2f)));
+                object spec = New("PieceSpec", ("data", mesh), ("bodies", new[] { 0 }), ("cut", new[] { false }),
+                                  ("massFraction", new[] { 1f }), ("bounds", meshType.GetMethod("GetBounds").Invoke(mesh, null)));
+                object context = New("PieceContext", ("family", New("PieceFamily")), ("tornLimb", true));
+                return (Component)ZType("SlicedPiece").GetMethod("Create").Invoke(null, new[] { spec, skeleton, context });
+            }
+
+            Component small = MakePiece(0.025f, -0.5f);
+            Component large = MakePiece(0.05f, 0.5f);
+            yield return null;
+            Expect("4 cm piece has no native handle", !small.GetComponentInChildren<Handle>(), "below threshold");
+            Handle handle = large.GetComponentInChildren<Handle>();
+            Expect("9 cm piece retains a native telekinesis handle", handle && handle.data.allowTelekinesis, "above threshold");
+            var grabType = ZType("PieceGrab");
+            object grab = Activator.CreateInstance(grabType);
+            Component body = small.GetComponentInChildren(ZType("PieceBody"));
+            grabType.GetMethod("Grab", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(grab,
+                new object[] { 1, Player.local.creature.handRight, body, null });
+            Expect("4 cm piece cannot be picked up through the fallback", body && !body.GetComponent<ConfigurableJoint>(), "no grip joint");
+        }
+
+        /// <summary>Use both game grip systems and a blade on the already detached piece.</summary>
+        private IEnumerator CheckTornLimb(Creature c)
+        {
+            RagdollPart arm = c.ragdoll.GetPart(RagdollPart.Type.LeftArm);
+            var pieces = Pieces();
+            Expect("one limb detached", LogHas("torn at the joint") && Cuts(c) == 1 && pieces.Count == 1,
+                   $"cuts {Cuts(c)}, pieces {pieces.Count}, {LastLines("torn at the joint", 1)}");
+            Expect("alive with stump attached", c && !c.isKilled && arm.characterJoint && !arm.isSliced,
+                   $"alive {(!c.isKilled)}, joint {arm.characterJoint}, sliced {arm.isSliced}");
+            ExpectNotStretched();
+            Component limb = pieces.FirstOrDefault();
+            if (!limb) yield break;
+            var cap = c.GetComponentsInChildren<SkinnedMeshRenderer>().LastOrDefault(r => r.name == "Zandatsu_CreatureCap");
+            if (cap)
+            {
+                Transform seamBone = cap.bones.FirstOrDefault();
+                var rims = c.GetComponentsInChildren<SkinnedMeshRenderer>().Where(r => r != cap && r.enabled &&
+                    r.sharedMesh && r.sharedMesh.name.EndsWith("(Zandatsu)") && r.bones.LastOrDefault() == seamBone).ToArray();
+                Expect("NPC rim and cap share their attachment", seamBone && rims.Length > 0, $"bone {seamBone}");
+                if (seamBone) CheckNpcRim(cap, rims);
+                Rigidbody[] bodies = c.ragdoll.parts.Where(p => p && p.physicBody != null && p.physicBody.rigidBody)
+                    .Select(p => p.physicBody.rigidBody).Distinct().ToArray();
+                yield return ShotRaisedCap(cap, 0, "npc_cap", bodies);
+            }
+            Handle grip = limb.GetComponentsInChildren<Handle>().FirstOrDefault(h => h && h.physicBody != null && h.data.allowTelekinesis);
+            Expect("native handle on detached rigidbody", grip && !grip.GetComponentInParent<Creature>() && !grip.item,
+                   grip ? $"{grip.GetType().Name}, tag {grip.tag}" : "none");
+            if (!grip) yield break;
+
+            RagdollHand hand = Player.local.creature.handRight;
+            hand.Grab(grip, false);
+            yield return new WaitForFixedUpdate();
+            Expect("game hand grip joined", hand.grabbedHandle == grip && hand.gripInfo?.joint,
+                   $"held {hand.grabbedHandle == grip}");
+            if (hand.grabbedHandle) hand.UnGrab(false);
+
+            var tk = hand.creature.mana.casterRight.telekinesis;
+            tk.targetHandle = grip;
+            bool caught = tk.TryCatch();
+            yield return new WaitForFixedUpdate();
+            Expect("game telekinesis joined", caught && tk.catchedHandle == grip &&
+                   tk.grip.GetComponents<ConfigurableJoint>().Any(j => j.connectedBody == grip.physicBody.rigidBody), $"caught {caught}");
+            if (!tk.TryRelease()) tk.TryRelease();
+            yield return Wait(0.4f);
+
+            Vector3 away = Vector3.ProjectOnPlane(Center(limb) - c.transform.position, Vector3.up).normalized;
+            if (away.sqrMagnitude < 0.1f) away = stageFwd;
+            foreach (Rigidbody rb in limb.GetComponentsInChildren<Rigidbody>())
+            {
+                rb.position += away * 2f;
+                rb.velocity = Vector3.zero;
+                rb.angularVelocity = Vector3.zero;
+            }
+            yield return Wait(0.6f);
+            yield return ShotNear("torn_limb", Center(limb), 1.3f);
+            yield return ShotTornCap(limb);
+            Collider target = limb.GetComponentsInChildren<Collider>().Where(x => x.enabled && !x.isTrigger)
+                                  .OrderByDescending(x => x.bounds.size.sqrMagnitude).First();
+            Vector3 at = target.bounds.center;
+            Vector3 along = Vector3.ProjectOnPlane(grip.transform.up, Vector3.up).normalized;
+            if (along.sqrMagnitude < 0.1f) along = Vector3.forward;
+            Item blade = null;
+            yield return SpawnItem(Sword, x => blade = x);
+            if (blade) yield return Swing(blade, at, Vector3.Cross(along, Vector3.up), Vector3.down, 10f, false);
+            yield return Wait(1.2f);
+            Expect("torn limb cut again by blade", LogHas("re-cut piece"), $"pieces {Pieces().Count}");
+            Expect("recut parts still grabbable", Pieces().Any(p => p != limb && p.GetComponentInChildren<Handle>()), $"pieces {Pieces().Count}");
+            ExpectNotStretched();
+
+            c.Despawn();
+            yield return Wait(0.6f);
+            Creature pooled = null;
+            yield return Enemy(x => pooled = x);
+            if (pooled)
+            {
+                var missing = pooled.ragdoll.parts.Where(p => p && p.parentPart && !p.characterJoint).Select(p => p.name).ToArray();
+                Expect("pooled enemy has all joints", missing.Length == 0, $"reused {pooled == c}, missing {string.Join(", ", missing)}");
+            }
+        }
+
+        private void CheckNpcRim(SkinnedMeshRenderer cap, SkinnedMeshRenderer[] rims)
+        {
+            Vector3[] capEdge = cap.sharedMesh.vertices.Select(cap.sharedMesh.bindposes[0].MultiplyPoint3x4).ToArray();
+            int matched = 0, total = 0;
+            foreach (var rim in rims)
+            {
+                Mesh mesh = rim.sharedMesh;
+                int seam = rim.bones.Length - 1;
+                var bind = mesh.bindposes[seam];
+                Vector3[] vertices = mesh.vertices;
+                BoneWeight[] weights = mesh.boneWeights;
+                for (int i = 0; i < weights.Length; i++)
+                {
+                    if (weights[i].boneIndex0 != seam || weights[i].weight0 < 0.999f) continue;
+                    Vector3 p = bind.MultiplyPoint3x4(vertices[i]);
+                    total++;
+                    if (capEdge.Any(v => (v - p).sqrMagnitude < 0.003f * 0.003f)) matched++;
+                }
+            }
+            Expect("NPC cut rim meets the cap", total > 0 && matched >= total * 0.9f, $"{matched}/{total} rim vertices within 3 mm");
+        }
+
+        private IEnumerator PullArm(RagdollPart arm, RagdollPart torso)
+        {
+            Vector3 away = (arm.transform.position - torso.transform.position).normalized;
+            float start = Time.time;
+            while (arm.characterJoint && !LogHas("torn at the joint") && Time.time - start < 1.7f)
+            {
+                arm.physicBody.velocity = away * (1f + 12f * (Time.time - start));
+                if (!torso.physicBody.isKinematic) torso.physicBody.velocity = Vector3.zero;
+                yield return new WaitForFixedUpdate();
+            }
+        }
+
+        private IEnumerator S_rip_grab() => RipWithGrips(false);
+        private IEnumerator S_rip_tk() => RipWithGrips(true);
+
+        private IEnumerator RipWithGrips(bool telekinesis, bool checkPiece = false)
+        {
+            Creature c = null;
+            yield return Enemy(x => c = x, checkPiece ? "ApparelCivilianChest" : telekinesis ? MetalChest : null);
+            if (!c) yield break;
+            var arm = c.ragdoll.GetPart(RagdollPart.Type.LeftArm);
+            var torso = c.ragdoll.GetPart(RagdollPart.Type.Torso);
+            Handle armGrip = c.ragdoll.parts.Where(p => p && (p == arm || p.parentPart == arm))
+                              .SelectMany(p => p.handles).FirstOrDefault(h => h && h.data != null);
+            Handle torsoGrip = torso.handles.FirstOrDefault(h => h && h.data != null);
+            Expect("enemy handles", armGrip && torsoGrip, $"arm {armGrip}, torso {torsoGrip}");
+            if (!armGrip || !torsoGrip) yield break;
+            c.ragdoll.SetState(Ragdoll.State.Destabilized);
+            yield return Wait(0.4f);
+            Creature player = Player.local.creature;
+            RagdollHand left = player.handLeft, right = player.handRight;
+            var leftTk = player.mana.casterLeft.telekinesis;
+            var rightTk = player.mana.casterRight.telekinesis;
+            var bruteForce = Catalog.GetData<SkillData>("BruteForce");
+            bool addedSkill = !telekinesis && !player.HasSkill(bruteForce);
+            bool leftAllow = leftTk.allowDismemberment, rightAllow = rightTk.allowDismemberment;
+            bool leftPressed = left.playerHand.controlHand.gripPressed, rightPressed = right.playerHand.controlHand.gripPressed;
+            bool torsoKinematic = torso.physicBody.isKinematic;
+            PlayerHand.StuckBehaviour stuckBehaviour = PlayerHand.stuckBehaviour;
+            try
+            {
+                if (telekinesis)
+                {
+                    var skill = (SkillRipAndTear)Catalog.GetData<SkillData>("RipAndTear");
+                    skill.OnTkHandSkillLoad(player, leftTk);
+                    skill.OnTkHandSkillLoad(player, rightTk);
+                    leftTk.targetHandle = torsoGrip;
+                    bool leftCaught = leftTk.TryCatch();
+                    yield return null;
+                    Expect("one telekinesis grip leaves the joint intact", arm.characterJoint && float.IsInfinity(arm.characterJoint.breakForce), "one grip");
+                    rightTk.targetHandle = armGrip;
+                    bool rightCaught = rightTk.TryCatch();
+                    Expect("two native telekinesis grips", leftCaught && rightCaught, $"left {leftCaught}, right {rightCaught}");
+                }
+                else
+                {
+                    // The mock headset watches the stage from a distance. Keep that distance from auto-dropping the grips.
+                    PlayerHand.stuckBehaviour = PlayerHand.StuckBehaviour.Hold;
+                    if (addedSkill) player.TryAddSkill(bruteForce);
+                    left.playerHand.controlHand.gripPressed = true;
+                    right.playerHand.controlHand.gripPressed = true;
+                    left.Grab(torsoGrip, false);
+                    right.Grab(armGrip, false);
+                    // Match the test controllers' joint anchors to the held parts before adding the scripted pull.
+                    AlignMockGrip(left);
+                    AlignMockGrip(right);
+                    torso.physicBody.isKinematic = true;
+                    Expect("two native hand grips", left.grabbedHandle == torsoGrip && right.grabbedHandle == armGrip, "torso and arm");
+                }
+                yield return null;
+                float force = arm.characterJoint ? arm.characterJoint.breakForce : float.PositiveInfinity;
+                Expect("joint armed with vanilla dismemberment disabled", !Damager.dismembermentEnabled && !float.IsInfinity(force),
+                       $"{force:0} N, vanilla flag {Damager.dismembermentEnabled}");
+                RagdollPart other = c.ragdoll.GetPart(RagdollPart.Type.RightArm);
+                Expect("other arm stayed protected", other.characterJoint && float.IsInfinity(other.characterJoint.breakForce), "opposite shoulder");
+                if (telekinesis && !checkPiece)
+                {
+                    if (!rightTk.TryRelease()) rightTk.TryRelease();
+                    yield return null;
+                    Expect("releasing the grip restores joint strength", arm.characterJoint && float.IsInfinity(arm.characterJoint.breakForce), "one grip remains");
+                    rightTk.targetHandle = armGrip;
+                    Expect("arm can be gripped again", rightTk.TryCatch(), "second attempt");
+                    yield return null;
+                }
+                yield return PullArm(arm, torso);
+                yield return Wait(0.6f);
+                Handle held = telekinesis ? rightTk.catchedHandle : right.grabbedHandle;
+                Expect("grip transferred to detached limb", held && held.GetComponentInParent(ZType("TornLimb")), $"held {held}");
+                Expect("enemy still alive", c && !c.isKilled && Cuts(c) == 1, $"cuts {Cuts(c)}, health {(c ? c.currentHealth : 0):0.0}");
+            }
+            finally
+            {
+                if (telekinesis)
+                {
+                    if (!rightTk.TryRelease()) rightTk.TryRelease();
+                    if (!leftTk.TryRelease()) leftTk.TryRelease();
+                    leftTk.allowDismemberment = leftAllow;
+                    rightTk.allowDismemberment = rightAllow;
+                }
+                else
+                {
+                    if (right.grabbedHandle) right.UnGrab(false);
+                    if (left.grabbedHandle) left.UnGrab(false);
+                    if (torso && torso.physicBody != null) torso.physicBody.isKinematic = torsoKinematic;
+                    if (addedSkill) player.TryRemoveSkill(bruteForce);
+                    PlayerHand.stuckBehaviour = stuckBehaviour;
+                    left.playerHand.controlHand.gripPressed = leftPressed;
+                    right.playerHand.controlHand.gripPressed = rightPressed;
+                }
+            }
+            if (checkPiece && c) yield return CheckTornLimb(c);
+            else if (telekinesis && Pieces().FirstOrDefault() is Component limb)
+            {
+                yield return Wait(0.6f);
+                yield return ShotTornCap(limb);
+            }
+        }
+
+        private static void AlignMockGrip(RagdollHand hand)
+        {
+            if (hand.gripInfo == null) return;
+            foreach (ConfigurableJoint joint in new[] { hand.gripInfo.joint, hand.gripInfo.playerJoint })
+                if (joint && joint.connectedBody)
+                    joint.anchor = joint.transform.InverseTransformPoint(joint.connectedBody.transform.TransformPoint(joint.connectedAnchor));
         }
 
         /// <summary>Recut Delay 0.5 (default): two swings 0.25 s apart, same blade: the second is the same swing.</summary>
@@ -1545,22 +1866,72 @@ namespace ZandatsuLab
         }
 
         /// <summary>Cut Weapons: a sword hanging in the air is cut in two by a swing through it.</summary>
-        private IEnumerator S_weapon_cut()
+        private IEnumerator S_weapon_cut() => WeaponCut(false);
+        private IEnumerator S_weapon_fire() => WeaponCut(true);
+        private IEnumerator S_weapon_fire_shape() => WeaponCut(true, true);
+
+        private IEnumerator WeaponCut(bool fire, bool testRemovedShape = false)
         {
             Vector3 front = PlayerFront(2f) + Vector3.up * 1.2f;
             Item target = null;
-            yield return SpawnItem(Sword, x => target = x, front);
+            yield return SpawnItem(fire ? "SwordShortBastard" : Sword, x => target = x, front);
             if (!target) yield break;
             target.physicBody.isKinematic = true;
             target.transform.rotation = Quaternion.Euler(0f, 0f, 90f);   // lying across
+            if (fire)
+            {
+                var spell = Catalog.GetData<SpellCastCharge>("Fire");
+                foreach (Imbue imbue in target.imbues) imbue.Transfer(spell, 1000f);
+            }
             yield return Wait(0.5f);
             Damager td = SlashDamager(target);
             Vector3 mid = td ? td.transform.position : target.transform.position;
+            if (fire)
+            {
+                Handle grip = target.mainHandleRight;
+                if (grip && td) mid += (grip.transform.position - mid).normalized * td.penetrationLength * 0.3f;
+                Expect("target already on fire", target.imbues.Any(i => i.energy > 0f && i.spellCastBase?.imbueEffect != null), "active fire imbue");
+                if (testRemovedShape && grip)
+                {
+                    Vector3 tip = mid + Vector3.right * Mathf.Sign(mid.x - grip.transform.position.x) * 0.15f;
+                    var shape = new GameObject("LabFireShape");
+                    shape.transform.SetParent(target.transform, true);
+                    shape.transform.position = tip;
+                    var mesh = new Mesh { vertices = new[] { Vector3.zero, Vector3.up * 0.03f, Vector3.forward * 0.03f }, triangles = new[] { 0, 1, 2 } };
+                    shape.AddComponent<MeshFilter>().sharedMesh = mesh;
+                    var emitter = shape.AddComponent<MeshRenderer>();
+                    emitter.enabled = false;
+                    foreach (Imbue imbue in target.imbues)
+                    {
+                        imbue.colliderGroup.imbueEffectRenderer = emitter;
+                        imbue.spellCastBase?.imbueEffect?.SetRenderer(emitter, false);
+                    }
+                }
+                yield return ShotAt("imbued_before", mid);
+            }
             Item blade = null;
             yield return SpawnItem(Sword, x => blade = x);
             yield return Swing(blade, mid, Vector3.forward, Vector3.down, 10f, false);
             yield return Wait(1.5f);
             Expect("weapon cut", LogHas("weapon cut"), LastLines("weapon cut", 2));
+            if (fire)
+            {
+                var cap = target.GetComponentsInChildren<MeshRenderer>().FirstOrDefault(r => r.name == "Zandatsu_WeaponCut");
+                var grip = target.mainHandleRight;
+                var emitters = target.imbues.Where(i => i.energy > 0f && i.spellCastBase?.imbueEffect != null)
+                    .Select(i => i.colliderGroup.imbueEffectRenderer).Where(r => r).Distinct().ToList();
+                bool fits = cap && grip && emitters.Count > 0;
+                if (fits)
+                {
+                    Vector3 plane = cap.bounds.center;
+                    Vector3 normal = Vector3.right * Mathf.Sign(grip.transform.position.x - plane.x);
+                    fits = emitters.All(r => r.TryGetComponent(out MeshFilter mesh) && mesh.sharedMesh && mesh.sharedMesh.isReadable &&
+                        mesh.sharedMesh.vertices.All(v => Vector3.Dot(r.transform.TransformPoint(v) - plane, normal) >= -0.003f));
+                }
+                Expect("fire geometry ends at the cut", fits, $"active emitters {emitters.Count}");
+                if (testRemovedShape)
+                    Expect("discarded emitter got replacement geometry", emitters.Any(r => r.GetComponent<MeshFilter>()?.sharedMesh?.name.Contains("Zandatsu Imbue") == true), "clipped fallback");
+            }
             yield return ShotAt("after", mid);
         }
 
@@ -2150,10 +2521,10 @@ namespace ZandatsuLab
 
         // ---------- actions ----------
 
-        private IEnumerator Enemy(Action<Creature> done, string wear = null, bool brain = false)
+        private IEnumerator Enemy(Action<Creature> done, string wear = null, bool brain = false, string creatureId = "HumanMale")
         {
             Creature c = null;
-            CreatureData data = Catalog.GetData<CreatureData>("HumanMale");
+            CreatureData data = Catalog.GetData<CreatureData>(creatureId);
             Vector3 pos = PlayerFront(2.5f);
             Vector3 fwd = (PlayerPos() - pos).normalized;
             fwd.y = 0f;
@@ -2824,7 +3195,7 @@ namespace ZandatsuLab
         }
 
         /// <summary>A close look at a point from above and the side (a piece lying on the floor).</summary>
-        private IEnumerator ShotNear(string name, Vector3 target, float distance)
+        private IEnumerator ShotNear(string name, Vector3 target, float distance, Vector3? direction = null)
         {
             yield return new WaitForEndOfFrame();
             shotFrames.Add(Time.frameCount);
@@ -2837,7 +3208,7 @@ namespace ZandatsuLab
             try
             {
                 Vector3 side = Vector3.Cross(Vector3.up, stageFwd.sqrMagnitude > 0.1f ? stageFwd : Vector3.forward);
-                go.transform.position = target + (Vector3.up * 0.8f + side * 0.6f).normalized * distance;
+                go.transform.position = target + (direction ?? (Vector3.up * 0.8f + side * 0.6f).normalized) * distance;
                 go.transform.LookAt(target);
                 cam.Render();
                 RenderTexture.active = rt;
@@ -2854,6 +3225,90 @@ namespace ZandatsuLab
                 cam.targetTexture = null;
                 Destroy(rt);
                 Destroy(go);
+            }
+        }
+
+        /// <summary>Photograph the tear from the cap side, clear of the floor and the rest of the NPC.</summary>
+        private IEnumerator ShotTornCap(Component limb)
+        {
+            var renderer = limb.GetComponentInChildren<SkinnedMeshRenderer>();
+            var fill = limb.GetType().GetField("fill")?.GetValue(limb) as Material;
+            int submesh = renderer && fill ? Array.IndexOf(renderer.sharedMaterials, fill) : -1;
+            Expect("torn limb has a cap", submesh >= 0, $"submesh {submesh}");
+            if (submesh < 0) yield break;
+            yield return ShotRaisedCap(renderer, submesh, "torn_cap", limb.GetComponentsInChildren<Rigidbody>());
+        }
+
+        private IEnumerator ShotRaisedCap(SkinnedMeshRenderer renderer, int submesh, string name, Rigidbody[] bodies)
+        {
+            var positions = bodies.Select(body => body.position).ToArray();
+            var kinematic = bodies.Select(body => body.isKinematic).ToArray();
+            try
+            {
+                for (int i = 0; i < bodies.Length; i++)
+                {
+                    bodies[i].isKinematic = true;
+                    bodies[i].transform.position = bodies[i].position = positions[i] + Vector3.up * 0.8f;
+                }
+                Physics.SyncTransforms();
+                yield return new WaitForEndOfFrame();
+                yield return ShotSkinnedCap(renderer, submesh, name);
+            }
+            finally
+            {
+                for (int i = 0; i < bodies.Length; i++)
+                {
+                    if (!bodies[i]) continue;
+                    bodies[i].transform.position = bodies[i].position = positions[i];
+                    bodies[i].isKinematic = kinematic[i];
+                }
+            }
+        }
+
+        private IEnumerator ShotSkinnedCap(SkinnedMeshRenderer renderer, int submesh, string name)
+        {
+            var mesh = new Mesh();
+            try
+            {
+                Vector3[] vertices;
+                int[] indices;
+                if (name == "npc_cap")
+                {
+                    // The NPC cap is rigidly skinned to the same bone as the rim. Sample it in world coordinates.
+                    Mesh cap = renderer.sharedMesh;
+                    Matrix4x4 pose = renderer.bones[0].localToWorldMatrix * cap.bindposes[0];
+                    vertices = cap.vertices.Select(pose.MultiplyPoint3x4).ToArray();
+                    indices = cap.GetTriangles(submesh);
+                }
+                else
+                {
+                    renderer.BakeMesh(mesh);
+                    vertices = mesh.vertices.Select(renderer.transform.TransformPoint).ToArray();
+                    indices = mesh.GetTriangles(submesh);
+                }
+                Vector3 normal = Vector3.zero, center = Vector3.zero;
+                float area = 0f;
+                for (int i = 0; i < indices.Length; i += 3)
+                {
+                    Vector3 a = vertices[indices[i]], b = vertices[indices[i + 1]], c = vertices[indices[i + 2]];
+                    Vector3 cross = Vector3.Cross(b - a, c - a);
+                    float weight = cross.magnitude;
+                    area += weight;
+                    normal += cross;
+                    center += (a + b + c) * (weight / 3f);
+                }
+                if (area > 1e-6f && normal.sqrMagnitude > 1e-10f)
+                {
+                    Vector3 point = center / area;
+                    Vector3 facing = normal.normalized;
+                    Vector3 side = Vector3.Cross(facing, Mathf.Abs(facing.y) < 0.9f ? Vector3.up : Vector3.right).normalized;
+                    yield return ShotNear(name, point, 0.33f, facing);
+                    yield return ShotNear(name + "_edge", point, 0.33f, (facing + side * 0.9f).normalized);
+                }
+            }
+            finally
+            {
+                Destroy(mesh);
             }
         }
 

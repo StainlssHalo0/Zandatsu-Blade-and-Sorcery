@@ -1,6 +1,6 @@
 {
   "Name": "ZandatsuLab",
-  "Description": "Zandatsu test bench (local only, never released). Inactive unless the game is started with -zandatsulab <scenario>.",
+  "Description": "Local Zandatsu test bench and Grid test map. Automated tests run with -zandatsulab <scenario>.",
   "Author": "StainlessHalo",
   "ModVersion": "0.1",
   "GameVersion": "1.0.0.0",

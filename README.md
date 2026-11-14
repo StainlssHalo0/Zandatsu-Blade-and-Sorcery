@@ -4,7 +4,7 @@
 
 Zandatsu lets a fast edge swing cut enemies, weapons, shields and many props along the real plane of the blade, instead of only at the game's joints. It is inspired by Blade Mode in *Metal Gear Rising: Revengeance*.
 
-- **Packaged release:** 0.7.0. The current source branch includes changes made after that release.
+- **Current PCVR build:** 0.8.0
 - **Tested game version:** Blade & Sorcery PCVR 1.3.2
 - **License:** MIT — see [LICENSE](LICENSE).
 
@@ -24,7 +24,10 @@ The current source also improves tear-cap alignment and fire effects on shortene
 
 ## Download
 
-Ready-to-use PCVR packages are available on [GitHub Releases](https://github.com/StainlssHalo0/Zandatsu-Blade-and-Sorcery/releases). Download the `Zandatsu-x.y.z.zip` asset; compiling the source and obtaining reference DLLs are not necessary.
+- [Zandatsu 0.8.0 for PCVR](downloads/Zandatsu-0.8.0-PCVR.zip)
+- [ZandatsuLab Grid for PCVR](downloads/ZandatsuLab-Grid-PCVR.zip), the optional test map and test bench.
+
+Extract each archive directly into `BladeAndSorcery_Data/StreamingAssets/Mods`. The archives contain the `Zandatsu` and `ZandatsuLab` folders respectively. Older packages are available on [GitHub Releases](https://github.com/StainlssHalo0/Zandatsu-Blade-and-Sorcery/releases).
 
 ## Requirements for players
 
@@ -132,7 +135,7 @@ The prebuilt PC bundle is `assets/zandatsu.shaders`. Rebuilding it requires the 
 
 ## Test bench
 
-`lab/ZandatsuLab.cs` is an optional in-game test bench. It is not part of the released mod and stays inactive unless the game is launched with `-zandatsulab`.
+ZandatsuLab is an optional companion mod. Open its Grid map with `loadlevel ZandatsuLabGrid` in the game console. The automated test runner activates only when the game is launched with `-zandatsulab`. See the [map and test instructions](lab/README.md).
 
 Build and install it with:
 

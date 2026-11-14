@@ -28,6 +28,9 @@
   <Target Name="CopyToMods" AfterTargets="Build" Condition="'$(DeployToGame)' == 'true'">
     <Error Condition="'$(GameDir)' == ''" Text="DeployToGame requires GameDir or BAS_GAME_DIR." />
     <MakeDir Directories="$(ModOut)" />
-    <Copy SourceFiles="$(OutDir)ZandatsuLab.dll;manifest.json" DestinationFolder="$(ModOut)" />
+    <ItemGroup>
+      <LabMapAsset Include="map\PC\*.bundle;map\PC\catalog_ZandatsuLab.*" />
+    </ItemGroup>
+    <Copy SourceFiles="$(OutDir)ZandatsuLab.dll;manifest.json;map\Level_ZandatsuLabGrid.json;@(LabMapAsset)" DestinationFolder="$(ModOut)" />
   </Target>
 </Project>

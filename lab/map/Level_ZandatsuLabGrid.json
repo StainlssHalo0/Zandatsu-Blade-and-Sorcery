@@ -1,0 +1,28 @@
+{
+  "$type": "ThunderRoad.LevelData, ThunderRoad",
+  "id": "ZandatsuLabGrid",
+  "version": 3,
+  "groupPath": "ZandatsuLab",
+  "name": "ZandatsuLab Grid",
+  "description": "A neutral, meter-marked test room for cuts, ragdolls, and debris.",
+  "sceneAddress": "ZandatsuLab.Level.Grid",
+  "showOnlyDevMode": false,
+  "showInLevelSelection": true,
+  "worldMapId": "Eraden",
+  "mapLocationIndex": 94,
+  "showOnMap": true,
+  "hideOnAndroid": true,
+  "mapLocationIconAddress": "Bas.Icon.Location.Arena",
+  "mapLocationIconHoverAddress": "Bas.Icon.Location.Arena_Highlight",
+  "modes": [
+    {
+      "$type": "ThunderRoad.LevelData+Mode, ThunderRoad",
+      "name": "Sandbox",
+      "displayName": "Sandbox",
+      "allowGameModes": ["Sandbox"],
+      "playerDeathAction": "AskReload",
+      "modules": [],
+      "availableOptions": []
+    }
+  ]
+}
