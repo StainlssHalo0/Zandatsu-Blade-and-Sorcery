@@ -27,9 +27,6 @@ namespace Zandatsu
         [ModOption("Cut Through Armour", "Any edge-first swing fast enough cuts, even where the game lets the blade glance off (metal armour); the cut armour edge glows hot", order = 3, category = Cat)]
         public static bool CutThroughArmour = true;
 
-        [ModOption("Only Player Cuts", "Only your own blades cut (NPC swords do vanilla damage)", order = 4, category = Cat)]
-        public static bool PlayerOnly = true;
-
         [ModOption("Cut At Health", "A living enemy can be cut only once his health is down to this share or lower, counting the blow itself (corpses always). Always = no limit", nameof(HealthValues), order = 5, category = Cat, defaultValueIndex = 0)]
         public static float CutAtHealth = 100f;
 
@@ -255,7 +252,7 @@ namespace Zandatsu
                 if (damager == null || damager.type != Damager.Type.Slash) return;
                 if (ItemCut.IsBlasterBolt(damager.collisionHandler ? damager.collisionHandler.item : null)) return;   // a shot, not a blade
                 if (StillIn(creature, damager.collisionHandler ? damager.collisionHandler.item : null)) return;
-                if (PlayerOnly && !ci.IsDoneByPlayer()) return;
+                if (!ci.IsDoneByPlayer()) return;
                 float speed = ci.impactVelocity.magnitude;
                 float fire = FireCut.Charge(ci.sourceColliderGroup);
                 if (speed < FireCut.MinSpeed(MinSwingSpeed, fire)) return;
@@ -837,7 +834,7 @@ namespace Zandatsu
                 string fate = "";
                 if (survives)
                 {
-                    float left = Survival.LimbLost(creature, HybridState.Get(creature, job.fill), job.skeleton, r.creature, job.normal, BleedOutTime,
+                    float left = Survival.LimbLost(creature, HybridState.Get(creature, job.fill), r.creature, BleedOutTime,
                                                    hurtHands, ctx.seared);
                     fate = $"; lives, bleeds out in {left:0} s";
                 }

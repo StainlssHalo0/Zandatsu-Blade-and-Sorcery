@@ -4,13 +4,13 @@
 
 Zandatsu lets a fast edge swing cut enemies, weapons, shields and many props along the real plane of the blade, instead of only at the game's joints. It is inspired by Blade Mode in *Metal Gear Rising: Revengeance*.
 
-- **Current PCVR build:** 0.8.0
+- **Current PCVR build:** 0.8.1
 - **Tested game version:** Blade & Sorcery PCVR 1.3.2
 - **License:** MIT — see [LICENSE](LICENSE).
 
 ## Features
 
-- Cut creatures at almost any angle, including through armour, and cut the corpse or loose pieces again.
+- Cut creatures at almost any angle, including through armour, and cut the corpse or loose pieces again. Only the player can trigger Zandatsu cuts.
 - Survivable limb cuts: an enemy can lose an arm or leg, keep fighting or fall, and bleed out.
 - Experimental `Tear Limbs` with `Hybrid Cuts` and vanilla dismemberment disabled. Torn limbs can be held by hand or telekinesis and cut again. Hand-tearing tests have given inconsistent results.
 - Cut weapons, shields, bows and the KharTib crossbow. Remaining weapons keep appropriate mass, balance and spell effects.
@@ -24,7 +24,7 @@ The current source also improves tear-cap alignment and fire effects on shortene
 
 ## Download
 
-- [Zandatsu 0.8.0 for PCVR](https://github.com/StainlssHalo0/Zandatsu-Blade-and-Sorcery/releases/download/v0.8.0/Zandatsu-0.8.0-PCVR.zip)
+- [Zandatsu 0.8.1 for PCVR](https://github.com/StainlssHalo0/Zandatsu-Blade-and-Sorcery/releases/download/v0.8.1/Zandatsu-0.8.1-PCVR.zip)
 - [ZandatsuLab Grid for PCVR](https://github.com/StainlssHalo0/Zandatsu-Blade-and-Sorcery/releases/download/v0.8.0/ZandatsuLab-Grid-PCVR.zip), the optional test map and test bench.
 
 Extract each archive directly into `BladeAndSorcery_Data/StreamingAssets/Mods`. The archives contain the `Zandatsu` and `ZandatsuLab` folders respectively. Older packages are available on [GitHub Releases](https://github.com/StainlssHalo0/Zandatsu-Blade-and-Sorcery/releases).

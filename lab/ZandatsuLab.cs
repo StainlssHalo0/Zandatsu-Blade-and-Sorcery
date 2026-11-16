@@ -169,7 +169,7 @@ namespace ZandatsuLab
             var declared = new Dictionary<string, object>
             {
                 ["Enabled"] = true, ["MinSwingSpeed"] = 7f, ["CleanCutsOnly"] = true, ["CutThroughArmour"] = true,
-                ["PlayerOnly"] = true, ["CutAtHealth"] = 100f, ["RecutPieces"] = true, ["RecutDelay"] = 0.5f,
+                ["CutAtHealth"] = 100f, ["RecutPieces"] = true, ["RecutDelay"] = 0.5f,
                 ["CutWeapons"] = true, ["CutProps"] = true, ["PalmChopCuts"] = true, ["FireCutsBurn"] = true, ["HotBladeCutsEasier"] = true,
                 ["PlainBladeHeatsSteel"] = true, ["HybridCuts"] = true, ["LimbCutsNotFatal"] = true, ["BleedOutTime"] = 20f,
                 ["VanillaDismemberment"] = false, ["SlowMotionOnCut"] = false, ["CutSound"] = true, ["SeparationSpeed"] = 1f,
@@ -299,6 +299,35 @@ namespace ZandatsuLab
             yield return Wait(7f);
             Expect("bled out", !c || c.isKilled || LogHas("bled out"), c ? $"alive {!c.isKilled}" : "gone");
             ExpectNotStretched();
+        }
+
+        private IEnumerator S_blood_anchor()
+        {
+            Creature c = null;
+            yield return Enemy(x => c = x);
+            if (!c) yield break;
+            for (int i = 0; i < 3 && Cuts(c) == 0; i++)
+            {
+                yield return SwingAt(c, RagdollPart.Type.RightArm, 12f, false, vertical: true);
+                yield return Wait(0.6f);
+            }
+            Type bloodType = ZType("CapBlood");
+            Component blood = c.GetComponentInChildren(bloodType);
+            Expect("limb cut created a blood source", blood && Cuts(c) >= 1 && !c.isKilled, $"{Cuts(c)} cuts");
+            if (!blood) yield break;
+            const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
+            var instances = (List<EffectInstance>)bloodType.GetField("effects", fields).GetValue(blood);
+            var anchor = (Transform)bloodType.GetField("anchor", fields).GetValue(blood);
+            var local = (Vector3)bloodType.GetField("localPosition", fields).GetValue(blood);
+            List<Effect> active = instances.Where(i => i.effects != null).SelectMany(i => i.effects).Where(e => e && e is EffectParticle).ToList();
+            Expect("blood follows the ragdoll at the cut face", active.Count > 0 && active.All(e => e.transform.IsChildOf(anchor) &&
+                Vector3.Distance(e.transform.position, anchor.TransformPoint(local)) < 0.01f), $"{active.Count} particle effects");
+            yield return Shot("bleeding", c);
+            var oldEffects = instances.ToArray();
+            blood.GetComponent<SkinnedMeshRenderer>().forceRenderingOff = true;
+            yield return Wait(0.7f);
+            Expect("old blood stopped after the wound disappeared", !blood && oldEffects.All(i => i.effects == null || i.effects.Count == 0),
+                   $"{oldEffects.Length} effects checked");
         }
 
         private IEnumerator S_rip_tear() => RipWithGrips(true, checkPiece: true);
@@ -2462,10 +2491,9 @@ namespace ZandatsuLab
             yield return Shot("after", c);
         }
 
-        /// <summary>The Outer Rim blaster bolts (Only Player Cuts off, so the bolt's hit reaches the check): no cut.</summary>
+        /// <summary>The Outer Rim blaster bolts fired by the player: no cut.</summary>
         private IEnumerator S_blaster()
         {
-            Set("PlayerOnly", false);
             Creature c = null;
             yield return Enemy(x => c = x);
             if (!c) yield break;
@@ -2485,6 +2513,7 @@ namespace ZandatsuLab
                 Vector3 dir = (chest - from).normalized;
                 rb.rotation = bolt.transform.rotation = Quaternion.LookRotation(dir);
                 bolt.Throw(1f, Item.FlyDetection.Forced);
+                bolt.lastHandler = Player.local.creature.handRight;
                 rb.velocity = dir * 60f;
                 yield return Wait(0.5f);
                 Note("bolt", $"{(bolt ? "still at " + bolt.transform.position : "gone: it hit")}, health {(c ? c.currentHealth.ToString("0") : "-")}");

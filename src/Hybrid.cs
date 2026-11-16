@@ -33,6 +33,7 @@ namespace Zandatsu
         public readonly List<RendererRecipe> renderers = new List<RendererRecipe>();
         public MeshData caps;           // world space at snapshot time, weights = skeleton body indices
         public int capKeptBody = -1;    // set by Hybrid.Apply: the body the cut face bleeds from (never a severed one)
+        internal CapBlood capBlood;
         public int side;                // +1 = the creature kept the side the cut normal points to
         public int[] bodyVerts;         // per skeleton body: vertices the creature kept
         public Vector3 capCenter;
@@ -585,12 +586,13 @@ namespace Zandatsu
             if (rebuilt + removed + reskinned > 0) state.HideLowerLods();   // LOD1+ meshes are uncut whole bodies
 
             int capVerts = 0;
+            SkinnedMeshRenderer cap = null;
             if (rec.caps != null && rec.caps.TriangleCount > 0)
             {
                 capVerts = rec.caps.VertexCount;
                 for (int i = 0; i < rec.caps.VertexCount; i++)
                     rec.caps.w[i] = seamBody != null ? Weights.Single(seam) : MoveOffSevered(rec.caps.w[i], keptBody, bodyCount);
-                AddCaps(state, rec, skel, fill, steel);
+                cap = AddCaps(state, rec, skel, fill, steel);
             }
 
             foreach (RagdollPart part in toSever) state.Sever(part);
@@ -610,16 +612,12 @@ namespace Zandatsu
 
             // A cut face weighted mostly to a severed hand bled from where that hand hung, frozen in the air.
             rec.capKeptBody = rec.capBody >= 0 && rec.capBody < bodyCount ? keptBody[rec.capBody] : -1;
-            if (blood != null && rec.capKeptBody >= 0 && skel.bodies[rec.capKeptBody].live)
+            if (cap && rec.capKeptBody >= 0 && skel.bodies[rec.capKeptBody].live)
             {
-                try
-                {
-                    Transform parent = skel.bodies[rec.capKeptBody].live;
-                    EffectInstance ei = blood.Spawn(rec.capCenter, Quaternion.LookRotation(-normal * rec.side), parent, null, true, null, false, 1f, 1f);
-                    ei.SetIntensity(1f);
-                    ei.Play();
-                }
-                catch (System.Exception e) { Debug.LogWarning("[Zandatsu] creature blood: " + e.Message); }
+                SkelBody body = skel.bodies[rec.capKeptBody];
+                rec.capBlood = cap.gameObject.AddComponent<CapBlood>();
+                rec.capBlood.Setup(cap, state, parts[rec.capKeptBody], body, rec.capCenter, -normal * rec.side);
+                if (blood != null) rec.capBlood.Play(blood, 1f);
             }
             return $"creature kept in {clock.Elapsed.TotalMilliseconds:0.0} ms: {rebuilt} meshes rebuilt, {reskinned} re-skinned off severed bones, {removed} hidden " +
                    $"[{string.Join(",", hiddenNames)}], {kept} untouched, {state.HiddenLodCount} LOD renderers hidden, {refitted} cut parts refitted, caps {capVerts}v, " +
@@ -951,7 +949,7 @@ namespace Zandatsu
         }
 
         /// <summary>The creature's own cut faces: a skinned mesh on the creature driven by its ragdoll part transforms.</summary>
-        private static void AddCaps(HybridState state, CreatureRecipe rec, Skeleton skel, Material fill, Material steel)
+        private static SkinnedMeshRenderer AddCaps(HybridState state, CreatureRecipe rec, Skeleton skel, Material fill, Material steel)
         {
             MeshData caps = rec.caps;
             int bodyCount = skel.bodies.Count;
@@ -961,7 +959,7 @@ namespace Zandatsu
             foreach (BoneWeight bw in caps.w)
                 foreach (int b in new[] { bw.boneIndex0, bw.boneIndex1, bw.boneIndex2, bw.boneIndex3 })
                     if (b >= 0 && b < bodyCount && remap[b] < 0 && skel.bodies[b].live) { remap[b] = used.Count; used.Add(b); }
-            if (used.Count == 0) return;
+            if (used.Count == 0) return null;
             for (int i = 0; i < caps.VertexCount; i++)
             {
                 if (Weights.Remap(caps.w[i], remap, out BoneWeight bw)) caps.w[i] = bw;
@@ -1008,6 +1006,7 @@ namespace Zandatsu
             state.Own(go);
             state.Own(mesh);
             PieceLighting.Apply(smr, state.family, null, false);   // lit at its bounds' middle: a bone under the floor made black
+            return smr;
         }
 
         /// <summary>Cap renderers mod-made on a creature by earlier hybrid cuts (baked like the creature's own meshes).</summary>

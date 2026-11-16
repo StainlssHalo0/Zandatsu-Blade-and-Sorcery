@@ -38,9 +38,7 @@ namespace Zandatsu
         /// </summary>
         private sealed class Stump
         {
-            public Transform parent;
-            public Vector3 localPos;
-            public Quaternion localRot;
+            public CapBlood source;
             public EffectData effect;
         }
 
@@ -125,7 +123,7 @@ namespace Zandatsu
         /// <param name="hurtHands">Hands that hold nothing from now on (DisarmCutArms).</param>
         /// <returns>Seconds left to live (diagnostics).</returns>
         /// <param name="seared">Cut by a hot blade: the stump is seared shut and does not spurt (the clock still runs).</param>
-        public static float LimbLost(Creature creature, HybridState state, Skeleton skel, CreatureRecipe rec, Vector3 normal, float bleedOutTime,
+        public static float LimbLost(Creature creature, HybridState state, CreatureRecipe rec, float bleedOutTime,
                                      List<RagdollHand> hurtHands, bool seared = false)
         {
             if (!bleeders.TryGetValue(creature, out Bleeder b))
@@ -147,11 +145,9 @@ namespace Zandatsu
                     if (hand && !b.lostHands.Contains(hand)) b.lostHands.Add(hand);
             if (legLost) Down(b);
 
-            int body = rec.capKeptBody;   // never a severed part: those hang where they were cut
-            if (!seared && body >= 0 && body < skel.bodies.Count && skel.bodies[body].live)
+            if (!seared && rec.capBlood)
             {
-                Transform parent = skel.bodies[body].live;
-                RagdollPart part = parent.GetComponent<RagdollPart>();
+                RagdollPart part = rec.capBlood.Part;
                 EffectData effect = part && part.data != null ? part.data.sliceChildEffectData : null;
                 if (effect == null)
                 {
@@ -165,9 +161,7 @@ namespace Zandatsu
                 if (effect != null)
                     b.stumps.Add(new Stump
                     {
-                        parent = parent,
-                        localPos = parent.InverseTransformPoint(rec.capCenter),
-                        localRot = Quaternion.Inverse(parent.rotation) * Quaternion.LookRotation(-normal * rec.side),
+                        source = rec.capBlood,
                         effect = effect
                     });
                 else Debug.LogWarning("[Zandatsu] no blood effect for the stump");
@@ -182,21 +176,10 @@ namespace Zandatsu
             float intensity = b.dead
                 ? Mathf.Lerp(0.5f, 0.1f, (Time.time - b.deathTime) / BleedAfterDeath)
                 : Mathf.Lerp(1f, 0.5f, (Time.time - b.startTime) / span);   // the bleed weakens as he runs out
-            foreach (Stump st in b.stumps)
+            for (int i = b.stumps.Count - 1; i >= 0; i--)
             {
-                if (!st.parent) continue;
-                try
-                {
-                    EffectInstance ei = st.effect.Spawn(st.parent.TransformPoint(st.localPos), st.parent.rotation * st.localRot, st.parent,
-                                                        null, true, null, false, intensity, 1f);
-                    ei.SetIntensity(intensity);
-                    ei.Play();
-                }
-                catch (Exception e)
-                {
-                    Debug.LogWarning("[Zandatsu] bleed: " + e.Message);
-                    st.parent = null;   // don't retry every half second
-                }
+                Stump st = b.stumps[i];
+                if (!st.source || !st.source.Play(st.effect, intensity)) b.stumps.RemoveAt(i);
             }
         }
 
