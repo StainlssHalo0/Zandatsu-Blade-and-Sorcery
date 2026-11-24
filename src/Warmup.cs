@@ -1,4 +1,5 @@
 using System;
+using Clipper2Lib;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Reflection;
@@ -39,6 +40,10 @@ namespace Zandatsu
 
         private static string TestCut(Material mat)
         {
+            var shell = new Paths64 { new Path64 { new Point64(-100,-100),new Point64(100,-100),new Point64(100,100),new Point64(-100,100) } };
+            var skin = new Paths64 { new Path64 { new Point64(-50,-50),new Point64(50,-50),new Point64(50,50),new Point64(-50,50) } };
+            var ring = Clipper.Difference(Clipper.Union(shell,FillRule.NonZero),skin,FillRule.NonZero);
+            Clipper.Triangulate(ring,out _,false);
             // A torso with two arms, cut across all three; both the snapshot and the hybrid recipe paths run.
             var skel = new Skeleton();
             skel.bodies.Add(new SkelBody { name = "Torso", pos = new Vector3(0, 0.3f, 0), rot = Quaternion.identity, parent = -1, mass = 10 });

@@ -22,6 +22,8 @@ namespace Zandatsu
         public Color32[] pc;
         public Mesh preparedFrom;   // the mesh they were interpolated from (used only if the renderer still has it)
         public Dictionary<int, (Vector3 position, Vector3 normal, Vector4 tangent)> tearEdge;
+        public Dictionary<int, BoneWeight> edgeBodyWeights;
+        internal Dictionary<int, BoneWeight> boundEdgeWeights;
     }
 
     /// <summary>
@@ -119,10 +121,12 @@ namespace Zandatsu
             VertexOrigin og = c.o[vi];
             if (og.b >= 0) lerped[rp.renderer] = true;
             map[vi] = rp.verts.Count;
-            if (tear && og.b >= 0)
+            if (og.b >= 0)
             {
                 if (rp.tearEdge == null) rp.tearEdge = new Dictionary<int, (Vector3, Vector3, Vector4)>();
                 rp.tearEdge.Add(map[vi], (c.v[vi], c.n[vi], c.t[vi]));
+                if (rp.edgeBodyWeights == null) rp.edgeBodyWeights = new Dictionary<int, BoneWeight>();
+                rp.edgeBodyWeights.Add(map[vi], c.w[vi]);
             }
             rp.verts.Add(og);
             return map[vi];
@@ -548,6 +552,7 @@ namespace Zandatsu
             int rebuilt = 0, removed = 0, kept = 0, reskinned = 0;
             int seam = rec.tear && rec.capBody >= 0 ? keptBody[rec.capBody] : -1;
             SkelBody seamBody = seam >= 0 && skel.bodies[seam].live ? skel.bodies[seam] : null;
+            bool bindWoundEdges = ArmourBody.HasBody(creature);
             var hiddenNames = new List<string>();
             foreach (RendererRecipe rp in rec.renderers)
             {
@@ -564,6 +569,28 @@ namespace Zandatsu
                                                    out Transform[] bones, out Matrix4x4[] bindposes);
                 if (rp.unchanged && !anySevered) { kept++; continue; }
                 int seamBone = -1;
+                if (seamBody == null && rp.edgeBodyWeights != null && bindWoundEdges)
+                {
+                    // Skin, clothing and caps must use the same moving bones at their shared boundary.
+                    bones = bones ?? smr.bones;
+                    bindposes = bindposes ?? smr.sharedMesh.bindposes;
+                    int offset = bones.Length;
+                    System.Array.Resize(ref bones, offset + bodyCount);
+                    System.Array.Resize(ref bindposes, offset + bodyCount);
+                    for (int b = 0; b < bodyCount; b++)
+                    {
+                        bones[offset + b] = skel.bodies[b].live;
+                        bindposes[offset + b] = skel.bodies[b].bind * smr.localToWorldMatrix;
+                    }
+                    rp.boundEdgeWeights = new Dictionary<int, BoneWeight>();
+                    foreach (var edge in rp.edgeBodyWeights)
+                    {
+                        BoneWeight weight = MoveOffSevered(edge.Value, keptBody, bodyCount);
+                        weight.boneIndex0 += offset; weight.boneIndex1 += offset;
+                        weight.boneIndex2 += offset; weight.boneIndex3 += offset;
+                        rp.boundEdgeWeights.Add(edge.Key, weight);
+                    }
+                }
                 if (seamBody != null && rp.tearEdge != null)
                 {
                     bones = bones ?? smr.bones;
@@ -761,7 +788,7 @@ namespace Zandatsu
                 if (rp.pc != null) mesh.SetColors(rp.pc);
             }
             else SetChannels(src, mesh, rp);
-            if (seamBone >= 0)
+            if (seamBone >= 0 || rp.boundEdgeWeights != null)
             {
                 var vertices = mesh.vertices;
                 var normals = mesh.normals;
@@ -854,6 +881,22 @@ namespace Zandatsu
             var sorted = new List<KeyValuePair<int, float>>();
             for (int k = 0; k < rp.verts.Count; k++)
             {
+                if (rp.boundEdgeWeights != null && rp.boundEdgeWeights.TryGetValue(k, out BoneWeight edgeWeight))
+                {
+                    byte count = 0;
+                    void AddEdge(int bone, float weight)
+                    {
+                        if (weight <= 0f) return;
+                        weights.Add(new BoneWeight1 { boneIndex = bone, weight = weight });
+                        count++;
+                    }
+                    AddEdge(edgeWeight.boneIndex0, edgeWeight.weight0);
+                    AddEdge(edgeWeight.boneIndex1, edgeWeight.weight1);
+                    AddEdge(edgeWeight.boneIndex2, edgeWeight.weight2);
+                    AddEdge(edgeWeight.boneIndex3, edgeWeight.weight3);
+                    counts[k] = count;
+                    continue;
+                }
                 if (seamBone >= 0 && rp.tearEdge.ContainsKey(k))
                 {
                     weights.Add(new BoneWeight1 { boneIndex = seamBone, weight = 1f });
@@ -935,7 +978,7 @@ namespace Zandatsu
                     src.GetBlendShapeFrameVertices(shape, f, dv, dn, dt);
                     for (int k = 0; k < n; k++)
                     {
-                        if (seamBone >= 0 && rp.tearEdge.ContainsKey(k)) continue;
+                        if ((seamBone >= 0 && rp.tearEdge.ContainsKey(k)) || (rp.boundEdgeWeights != null && rp.boundEdgeWeights.ContainsKey(k))) continue;
                         VertexOrigin og = rp.verts[k];
                         int a = og.a, b = og.b >= 0 ? og.b : og.a;
                         float t = og.b >= 0 ? og.t : 0f;

@@ -4,7 +4,9 @@
 
 Zandatsu lets a fast edge swing cut enemies, weapons, shields and many props along the real plane of the blade, instead of only at the game's joints. It is inspired by Blade Mode in *Metal Gear Rising: Revengeance*.
 
-- **Current PCVR build:** 0.8.1
+**Experimental branch.** This version uses the character's native body meshes under armour to build the exposed flesh surface on cuts and joint tears. Metal plates receive a separate cut edge. To try this version, build it from this branch using the instructions below. The downloads in Releases are for the stable version.
+
+- **Stable PCVR build:** 0.8.1
 - **Tested game version:** Blade & Sorcery PCVR 1.3.2
 - **License:** MIT — see [LICENSE](LICENSE).
 

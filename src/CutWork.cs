@@ -51,7 +51,16 @@ namespace Zandatsu
         public static CutResult SliceAndPrepare(MeshData src, Skeleton skel, Vector3 point, Vector3 normal, Material fill, int hitBody,
                                                 HashSet<Material> metal = null, Material steel = null,
                                                 int rootBody = -1, (int verts, int tris)[] sourceCounts = null, Material burn = null,
-                                                BurnField burnField = null, bool tear = false, HashSet<Material> hair = null)
+                                                BurnField burnField = null, bool tear = false, HashSet<Material> hair = null) =>
+            SliceAndPrepareWithSkin(src, skel, point, normal, fill, hitBody, metal, steel, rootBody, sourceCounts,
+                                    burn, burnField, tear, hair);
+
+        internal static CutResult SliceAndPrepareWithSkin(MeshData src, Skeleton skel, Vector3 point, Vector3 normal, Material fill, int hitBody,
+                                                HashSet<Material> metal = null, Material steel = null,
+                                                int rootBody = -1, (int verts, int tris)[] sourceCounts = null, Material burn = null,
+                                                BurnField burnField = null, bool tear = false, HashSet<Material> hair = null, HashSet<int> skinBodies = null,
+                                                HashSet<Material> skinMaterials = null,
+                                                HashSet<Material> previousFlesh = null, HashSet<Material> capOverlays = null)
         {
             var sw = Stopwatch.StartNew();
             int weightCount = src.w.Count;
@@ -67,13 +76,23 @@ namespace Zandatsu
             sbyte[] forced = tear ? TearSides(src, skel, hitBody, out cutBodies, out bodySide)
                                  : ForcedSides(src, skel, point, normal, hitBody, out cutBodies, out bodySide);
             double tPrep = sw.Elapsed.TotalMilliseconds;
-            if (!MeshSlicer.Slice(src, point, normal, fill, out MeshData a, out MeshData b, forced, metal, steel,
-                                  VolumeShape.FromSkeleton(skel), burn, burnField, clipForcedSeams: tear, hair: hair)) return null;
+            if (!MeshSlicer.SliceWithSkin(src, point, normal, fill, out MeshData a, out MeshData b, forced, metal, steel,
+                                  VolumeShape.FromSkeleton(skel), burn, burnField, clipForcedSeams: tear, hair: hair, skinBodies: skinBodies,
+                                  skinMaterials: skinMaterials,
+                                  previousFlesh: previousFlesh, capOverlays: capOverlays)) return null;
             double tSlice = sw.Elapsed.TotalMilliseconds;
             string sliceDetail = MeshSlicer.LastDetail;
 
+            if (skinMaterials != null && skinMaterials.Count > 0)
+            {
+                StitchSkinRims(a, fill, point, normal, tear, skinMaterials);
+                StitchSkinRims(b, fill, point, normal, tear, skinMaterials);
+            }
+
             if (tear)
             {
+                RoughenTear(a, point, normal);
+                RoughenTear(b, point, normal);
                 // Seam triangles can carry torso weights. The detached side must still contain only limb bodies.
                 var limbBodies = new int[bodySide.Length];
                 for (int i = 0; i < bodySide.Length; i++) limbBodies[i] = bodySide[i] < 0 ? -1 : i;
@@ -204,7 +223,149 @@ namespace Zandatsu
 
         // ---------- which bodies get cut ----------
 
+        // Insert skin rim points into the flesh surface before roughening to keep their moving bone weights.
+        private static void StitchSkinRims(MeshData mesh, Material fill, Vector3 point, Vector3 normal, bool tear, HashSet<Material> skin)
+        {
+            if (mesh.o == null) return;
+            int cap = mesh.mats.FindIndex(m => ReferenceEquals(m, fill));
+            if (cap < 0) return;
+            var triangles = mesh.subs[cap];
+            if (triangles.Count == 0) return;
+            var rims = new HashSet<int>();
+            for (int s = 0; s < mesh.subs.Count; s++)
+                if (mesh.subTag[s] >= 0 && skin.Contains(mesh.mats[s]))
+                    foreach (int id in mesh.subs[s]) if (mesh.o[id].r >= 0 && mesh.o[id].b >= 0) rims.Add(id);
+            Vector3 u = Vector3.Cross(normal, Mathf.Abs(normal.y) < 0.9f ? Vector3.up : Vector3.right).normalized;
+            Vector3 v = Vector3.Cross(normal, u);
+            var projected = new List<Vector2>(mesh.VertexCount+rims.Count);
+            foreach (Vector3 p in mesh.v) projected.Add(new Vector2(Vector3.Dot(p,u),Vector3.Dot(p,v)));
+            Vector2 P(int id) => projected[id];
+            double Cross(Vector2 a, Vector2 b, Vector2 c) => (double)(b.x-a.x)*(c.y-a.y)-(double)(b.y-a.y)*(c.x-a.x);
+            Vector2 lo = P(triangles[0]), hi = lo;
+            foreach (int id in triangles) { lo=Vector2.Min(lo,P(id)); hi=Vector2.Max(hi,P(id)); }
+            float step = Mathf.Max(0.008f,Mathf.Max(hi.x-lo.x,hi.y-lo.y)/24f);
+            var cells = new Dictionary<(int,int),List<int>>();
+            var nodes = new Dictionary<(int,int),List<Vector2>>();
+            var indexed = new HashSet<int>();
+            (int,int) NodeKey(Vector2 p) => (Mathf.FloorToInt(p.x*10000f),Mathf.FloorToInt(p.y*10000f));
+            void Node(int id)
+            {
+                if (!indexed.Add(id)) return;
+                var key = NodeKey(P(id));
+                if (!nodes.TryGetValue(key,out var list)) nodes.Add(key,list=new List<Vector2>());
+                list.Add(P(id));
+            }
+            void Triangle(int k)
+            {
+                int a=triangles[k], b=triangles[k+1], c=triangles[k+2];
+                if (!tear && (Mathf.Abs(Vector3.Dot(mesh.v[a]-point,normal))>0.0005f ||
+                              Mathf.Abs(Vector3.Dot(mesh.v[b]-point,normal))>0.0005f ||
+                              Mathf.Abs(Vector3.Dot(mesh.v[c]-point,normal))>0.0005f)) return;
+                Node(a); Node(b); Node(c);
+                Vector2 min=Vector2.Min(P(a),Vector2.Min(P(b),P(c)))-Vector2.one*0.000001f;
+                Vector2 max=Vector2.Max(P(a),Vector2.Max(P(b),P(c)))+Vector2.one*0.000001f;
+                for (int x=Mathf.FloorToInt(min.x/step); x<=Mathf.FloorToInt(max.x/step); x++)
+                    for (int y=Mathf.FloorToInt(min.y/step); y<=Mathf.FloorToInt(max.y/step); y++)
+                    {
+                        if (!cells.TryGetValue((x,y),out var list)) cells.Add((x,y),list=new List<int>());
+                        list.Add(k);
+                    }
+            }
+            for (int k=0;k<triangles.Count;k+=3) Triangle(k);
+            foreach (int rim in rims)
+            {
+                Vector2 p = P(rim);
+                bool existing = false;
+                var key = NodeKey(p);
+                for(int x=key.Item1-1;x<=key.Item1+1&&!existing;x++)
+                    for(int y=key.Item2-1;y<=key.Item2+1&&!existing;y++)
+                        if(nodes.TryGetValue((x,y),out var list))
+                            foreach(var q in list) if((q-p).sqrMagnitude<0.00000001f) { existing=true; break; }
+                if (existing) continue;
+                if (!cells.TryGetValue((Mathf.FloorToInt(p.x/step),Mathf.FloorToInt(p.y/step)),out var candidates)) continue;
+                int inserted = -1, end = candidates.Count;
+                for (int candidate = 0; candidate < end; candidate++)
+                {
+                    int k=candidates[candidate];
+                    int a = triangles[k], b = triangles[k+1], c = triangles[k+2];
+                    // Recut pieces also retain older wounds with the same material. Leave those surfaces intact.
+                    if (!tear && (Mathf.Abs(Vector3.Dot(mesh.v[a]-point,normal)) > 0.0005f ||
+                                  Mathf.Abs(Vector3.Dot(mesh.v[b]-point,normal)) > 0.0005f ||
+                                  Mathf.Abs(Vector3.Dot(mesh.v[c]-point,normal)) > 0.0005f)) continue;
+                    Vector2 pa = P(a), pb = P(b), pc = P(c);
+                    double area = Cross(pa,pb,pc);
+                    if (System.Math.Abs(area) < 1e-14) continue;
+                    double wa = Cross(p,pb,pc)/area, wb = Cross(pa,p,pc)/area, wc = 1-wa-wb;
+                    if (wa < -1e-7 || wb < -1e-7 || wc < -1e-7) continue;
+                    if (inserted < 0)
+                    {
+                        inserted = mesh.CopyVertex(mesh,a);
+                        mesh.v[inserted] = mesh.v[rim];
+                        mesh.w[inserted] = mesh.w[rim];
+                        mesh.uv[inserted] = mesh.uv[a]*(float)wa + mesh.uv[b]*(float)wb + mesh.uv[c]*(float)wc;
+                        mesh.o[inserted] = VertexOrigin.None;
+                        projected.Add(p);
+                        Node(inserted);
+                    }
+                    bool replaced = false;
+                    void Child(int x, int y)
+                    {
+                        if (Cross(P(x),P(y),p)*area <= 1e-20) return;
+                        if (!replaced) { triangles[k]=x; triangles[k+1]=y; triangles[k+2]=inserted; replaced=true; }
+                        else
+                        {
+                            int next=triangles.Count;
+                            triangles.Add(x); triangles.Add(y); triangles.Add(inserted);
+                            Triangle(next);
+                        }
+                    }
+                    Child(a,b); Child(b,c); Child(c,a);
+                }
+            }
+        }
+
         /// <summary>Cut only the torn body. Its descendants leave with the limb and the rest stays with the creature.</summary>
+        private static void RoughenTear(MeshData mesh, Vector3 point, Vector3 normal)
+        {
+            normal.Normalize();
+            Vector3 u = Vector3.Cross(normal, Mathf.Abs(normal.y) < 0.9f ? Vector3.up : Vector3.right).normalized;
+            Vector3 v = Vector3.Cross(normal, u);
+            var min = new Vector2(float.PositiveInfinity, float.PositiveInfinity);
+            var max = new Vector2(float.NegativeInfinity, float.NegativeInfinity);
+            for (int i = 0; i < mesh.VertexCount; i++)
+            {
+                if (mesh.o == null || (mesh.o[i].r >= 0 && mesh.o[i].b < 0)) continue;
+                Vector3 p = mesh.v[i] - point;
+                Vector2 q = new Vector2(Vector3.Dot(p, u), Vector3.Dot(p, v));
+                min = Vector2.Min(min, q); max = Vector2.Max(max, q);
+            }
+            float radius = Mathf.Min(max.x - min.x, max.y - min.y) * 0.5f;
+            float roughness = Mathf.Clamp(radius * 0.07f / 0.012f, 0.08f, 0.5f);
+            for (int i = 0; i < mesh.VertexCount; i++)
+            {
+                // Move the new seam and cap together. Original skin vertices keep their pose and skin weights.
+                if (mesh.o == null || (mesh.o[i].r >= 0 && mesh.o[i].b < 0)) continue;
+                Vector3 p = mesh.v[i] - point;
+                // Forced bone boundaries are not planar. Keep the matched skin/clothing rims and caps on one
+                // local wound surface before adding small size-dependent tears, rather than folding the cap.
+                mesh.v[i] -= normal * Vector3.Dot(p, normal);
+                float x = Vector3.Dot(p, u), y = Vector3.Dot(p, v);
+                float a = x * 130f + y * 75f;
+                float b = x * -95f + y * 210f + 1.7f;
+                float c = x * 290f + y * -160f + 0.6f;
+                float height = 0.006f * Mathf.Sin(a) + 0.004f * Mathf.Sin(b) + 0.002f * Mathf.Sin(c);
+                Vector3 gradient = u * (0.78f * Mathf.Cos(a) - 0.38f * Mathf.Cos(b) + 0.58f * Mathf.Cos(c)) +
+                                   v * (0.45f * Mathf.Cos(a) + 0.84f * Mathf.Cos(b) - 0.32f * Mathf.Cos(c));
+                mesh.v[i] += normal * (height * roughness);
+                Vector3 n = mesh.n[i];
+                mesh.n[i] = (n - gradient * (roughness * Vector3.Dot(n, normal))).normalized;
+                Vector4 tangent = mesh.t[i];
+                Vector3 t = new Vector3(tangent.x, tangent.y, tangent.z);
+                t = (t + normal * (roughness * Vector3.Dot(gradient, t))).normalized;
+                mesh.t[i] = new Vector4(t.x, t.y, t.z, tangent.w);
+            }
+        }
+
         private static sbyte[] TearSides(MeshData mesh, Skeleton skeleton, int hitBody, out string cutBodies, out sbyte[] bodySide)
         {
             cutBodies = skeleton.bodies[hitBody].name;

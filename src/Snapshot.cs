@@ -23,6 +23,17 @@ namespace Zandatsu
         private Bounds bounds;
         private Mesh source;
         private readonly Dictionary<long, Frame> frames = new Dictionary<long, Frame>();
+        private readonly Dictionary<int, ClosedSkin> closedSkin = new Dictionary<int, ClosedSkin>();
+
+        internal ClosedSkin GetClosedSkin(int sub)
+        {
+            lock (closedSkin)
+            {
+                if (!closedSkin.TryGetValue(sub, out var surface))
+                    closedSkin.Add(sub, surface = ClosedSkin.Build(v, tris[sub]));
+                return surface;
+            }
+        }
 
         public sealed class Frame
         {
@@ -472,6 +483,7 @@ namespace Zandatsu
                 bool drop = mi >= 0 && r.dropMat != null && r.dropMat[mi];
                 var list = new List<int>(drop ? 0 : tri.Length);
                 if (!drop) for (int i = 0; i < tri.Length; i++) list.Add(tri[i] + first);
+                world.sourceTopology.Add(world.subs.Count, (m, s, first));
                 world.subs.Add(list);
                 world.mats.Add(mi >= 0 ? r.mats[mi] : null);
                 world.blocks.Add(r.blocks != null && s < r.blocks.Length ? r.blocks[s] : null);

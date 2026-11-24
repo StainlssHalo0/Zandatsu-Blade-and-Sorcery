@@ -231,6 +231,8 @@ namespace Zandatsu
         }
 
         public static bool IsFire(Material m) => m && (charOf.ContainsKey(m) || glowing.Exists(g => g.m == m) || m.name == "Zandatsu_BurnEdge");
+        internal static bool IsCharred(Material m) => m && charOf.ContainsKey(m);
+        internal static bool IsRim(Material m) => m && m.name == "Zandatsu_BurnEdge";
 
         /// <summary>A copy for another owner (the corpse keeps its cut face after the pieces are gone), glowing in step.</summary>
         public static Material Adopt(Material m, PieceFamily family)

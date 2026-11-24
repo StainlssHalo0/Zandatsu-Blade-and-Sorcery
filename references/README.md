@@ -33,6 +33,7 @@ UnityEngine.VFXModule.dll
 
 ```text
 ThunderRoad.MaterialInstance.dll
+UnityEngine.JSONSerializeModule.dll
 UnityEngine.ScreenCaptureModule.dll
 ```
 

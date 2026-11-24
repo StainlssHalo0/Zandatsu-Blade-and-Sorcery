@@ -106,6 +106,9 @@ namespace Zandatsu
         [ModOption("Tear Limbs", "Use the game's joint break for Rip and Tear and two-handed grabs, with detachable Zandatsu limbs and Hybrid Cuts", order = 26, category = Cat)]
         public static bool TearLimbs = true;
 
+        [ModOption("Cheese Pull", "Stretching tissue strands between the body and a torn limb", order = 27, category = Cat)]
+        public static bool CheesePull = true;
+
         public static ModOptionFloat[] SpeedValues() => ModOptionFloat.CreateArray(1f, 40f, 0.5f);   // index 12 = 7 m/s default; damage curves top out at 20, fast wrist flicks reach 30+
         public static ModOptionFloat[] SeparationValues() => ModOptionFloat.CreateArray(0f, 5f, 0.5f);
         public static ModOptionInt[] MaxPieceValues() => ModOptionInt.CreateArray(10, 200, 10);
@@ -199,6 +202,7 @@ namespace Zandatsu
             Damager.dismembermentEnabled = GoreAllowed;
             ClearPieces();
             HybridState.ClearAll();
+            foreach (var body in UnityEngine.Object.FindObjectsOfType<ArmourBody>()) body.Restore(true);
             Survival.ClearAll();
             ItemCut.ClearAll();
             MeshCache.Clear();
@@ -215,6 +219,7 @@ namespace Zandatsu
             ClearPieces();
             HybridState.ClearAll();
             Survival.ClearAll();
+            foreach (var body in UnityEngine.Object.FindObjectsOfType<ArmourBody>()) body.Restore(false);
             ItemCut.ClearAll();
             MeshCache.Clear();
             waiting.Clear();
@@ -231,6 +236,7 @@ namespace Zandatsu
             RepairTornJoints(creature);
             try { HybridState.OnDespawn(creature); }
             catch (Exception e) { Debug.LogError("[Zandatsu] restoring hybrid-cut creature: " + e); }
+            creature.GetComponent<ArmourBody>()?.Restore(false);
             try { Survival.OnDespawn(creature); }
             catch (Exception e) { Debug.LogError("[Zandatsu] ending bleed-out: " + e); }
         }
@@ -462,8 +468,23 @@ namespace Zandatsu
             foreach (Creature.RendererData rd in creature.renderers)
                 if (rd != null && rd.renderer && rd.renderer.enabled) { family.sourceProbeUsage = rd.renderer.lightProbeUsage; break; }
             fill = family.OwnFill(fill);
-            OwnMaterials(snap, fill, family, metalSrc);
-            Material steel = NewSteel(family, fill, cut.fire);
+            OwnMaterials(snap, sources, fill, family, metalSrc);
+            var skinBodies = new HashSet<int>();
+            for (int i = 0; i < snap.renderers.Count; i++)
+            {
+                if (!ArmourBody.IsSkinRenderer(creature, sources[i])) continue;
+                var renderer = snap.renderers[i];
+                foreach (var material in renderer.mats) family.skin.Add(material);
+                if (renderer.boneBody == null) continue;
+                foreach (int body in renderer.boneBody)
+                    if (body >= 0 && body < skel.bodies.Count)
+                    {
+                        skinBodies.Add(body);
+                        family.skinBodyNames.Add(skel.bodies[body].name);
+                    }
+            }
+            family.usesNativeSkin = family.skin.Count > 0 || ArmourBody.ExpectsNativeSkin(creature);
+            Material steel = NewSteel(family, fill, cut.fire, cut.tear);
             var metal = new HashSet<Material>(family.metal);
             FireMaterials(cut.fire, fill, family, out Material capFill, out Material burn);
             family.pendingCuts++;
@@ -502,8 +523,9 @@ namespace Zandatsu
                 var clock = System.Diagnostics.Stopwatch.StartNew();
                 MeshData world = snap.Build();
                 float skinMs = (float)clock.Elapsed.TotalMilliseconds;
-                CutResult r = CutWork.SliceAndPrepare(world, skel, point, normal, capFill, hitBody, metal, steel,
-                                                      rootBody, rootBody >= 0 ? sourceCounts : null, burn, burnField, tear, family.hair);
+                CutResult r = CutWork.SliceAndPrepareWithSkin(world, skel, point, normal, capFill, hitBody, metal, steel,
+                                                      rootBody, rootBody >= 0 ? sourceCounts : null, burn, burnField, tear, family.hair,
+                                                      skinBodies, family.usesNativeSkin ? family.skin : null, family.previousFlesh, family.capOverlays);
                 MeshData.Return(world);   // sliced: nothing refers to the snapshot any more
                 if (r != null)
                 {
@@ -556,10 +578,10 @@ namespace Zandatsu
         }
 
         /// <summary>A hot steel material for this cut's armour edges (none if the family has no metal armour).</summary>
-        private static Material NewSteel(PieceFamily family, Material fill, float fire)
+        private static Material NewSteel(PieceFamily family, Material fill, float fire, bool cold = false)
         {
             if (family.metal.Count == 0) return null;
-            Material steel = HotSteel.Create(fill, HotSteel.PeakFor(fire));   // white-hot only with fire on the blade
+            Material steel = HotSteel.Create(fill, cold ? 0f : HotSteel.PeakFor(fire));
             if (!steel) return null;
             family.owned.Add(steel);
             family.metal.Add(steel);   // its band is steel too when cut again
@@ -568,12 +590,23 @@ namespace Zandatsu
 
         // The creature's materials are per-creature instances that get destroyed / reset (blood mask released) when it
         // despawns, which left pieces with missing (magenta) materials. Pieces get their own copies.
-        private static void OwnMaterials(CreatureSnapshot snap, Material fill, PieceFamily family, HashSet<Material> metalSrc)
+        private static void OwnMaterials(CreatureSnapshot snap, List<SkinnedMeshRenderer> sources, Material fill, PieceFamily family,
+            HashSet<Material> metalSrc)
         {
             var map = new Dictionary<Material, Material>();
-            foreach (RendererSnap r in snap.renderers)
+            for (int index = 0; index < snap.renderers.Count; index++)
+            {
+                RendererSnap r = snap.renderers[index];
+                bool oldCap = Hybrid.IsCreatureCap(sources[index]);
                 for (int i = 0; i < r.mats.Length; i++)
-                    r.mats[i] = OwnMaterial(r, i, map, fill, family, metalSrc);
+                {
+                    Material original = r.mats[i];
+                    Material copy = r.mats[i] = OwnMaterial(r, i, map, fill, family, metalSrc);
+                    if (!oldCap || !original || !copy) continue;
+                    if (HotSteel.IsHotSteel(original) || FireCut.IsRim(original)) family.capOverlays.Add(copy);
+                    else family.previousFlesh.Add(copy);
+                }
+            }
         }
 
         /// <summary>The piece's own copy of material i of a renderer (a material that cannot be drawn: the fill, or dropped).</summary>
@@ -802,6 +835,7 @@ namespace Zandatsu
                                            capEffect, job.point, job.normal);
                 if (job.tear && first)
                 {
+                    if (CheesePull) TearStrands.Create(first, r.pieces[0], job.skeleton, r.creature);
                     try { first.GetComponent<TornLimb>()?.TransferGrips(); }
                     catch (Exception e) { Debug.LogWarning("[Zandatsu] transferring torn limb grips: " + e.Message); }
                 }
@@ -1261,16 +1295,19 @@ namespace Zandatsu
         private static bool IsBreakable(RagdollPart part) =>
             part.ripBreak && (!part.characterJoint || !float.IsInfinity(part.characterJoint.breakForce));
 
+        internal static Vector3 JointPoint(RagdollPart part) => part.transform.TransformPoint(
+            part.characterJoint ? part.characterJoint.anchor : part.orgCharacterJointData != null ? part.orgCharacterJointData.anchor : Vector3.zero);
+
         private void StartTear(RagdollPart part, Creature creature)
         {
             if (!part.parentPart || part.physicBody == null || part.parentPart.physicBody == null || HybridState.IsSevered(creature, part)) return;
-            Vector3 origin = part.transform.position;
-            Vector3 axis = origin - part.parentPart.transform.position;
+            Vector3 origin = JointPoint(part);
+            Vector3 axis = origin - JointPoint(part.parentPart);
             foreach (RagdollPart child in creature.ragdoll.parts)
                 if (child && child.parentPart == part && !HybridState.IsSevered(creature, child) &&
-                    (child.transform.position - origin).sqrMagnitude > 0.0025f)
+                    (JointPoint(child) - origin).sqrMagnitude > 0.0025f)
                 {
-                    axis = child.transform.position - origin;
+                    axis = JointPoint(child) - origin;
                     break;
                 }
             if (axis.sqrMagnitude < 0.0001f) return;
@@ -1285,7 +1322,7 @@ namespace Zandatsu
                 StartCreatureCut(new PendingCut
                 {
                     creature = creature, hitPart = part, tear = true, normal = normal,
-                    point = origin + axis.normalized * Mathf.Min(0.05f, axis.magnitude * 0.25f), bladeVelocity = pull
+                    point = origin + axis.normalized * Mathf.Min(0.012f, axis.magnitude * 0.08f), bladeVelocity = pull
                 });
                 Debug.Log($"[Zandatsu] torn at the joint: {creature.name}, {part.name}");
             }
@@ -1388,6 +1425,7 @@ namespace Zandatsu
 
         private void OnCreatureSpawn(Creature creature)
         {
+            ArmourBody.Attach(creature);
             if (creature && !creature.isPlayer) prewarmQueue.Add(new KeyValuePair<Creature, float>(creature, Time.time + PrewarmDelay));
         }
 
@@ -1750,8 +1788,20 @@ namespace Zandatsu
             };
             BurnField burnField = FireCut.FieldOf(burn);
             var hair = piece.family.hair;
-            job.task = Task.Run(() => CutWork.SliceAndPrepare(data, skel, point, normal, capFill, hitBody, metal, steel, -1, null, burn,
-                                                                burnField, hair: hair));
+            var skinBodies = new HashSet<int>();
+            for (int i = 0; i < skel.bodies.Count; i++)
+                if (piece.family.skinBodyNames.Contains(skel.bodies[i].name)) skinBodies.Add(i);
+            var previousFlesh = new HashSet<Material>(piece.family.previousFlesh);
+            var capOverlays = new HashSet<Material>(piece.family.capOverlays);
+            foreach (Material material in data.mats)
+            {
+                if (!material) continue;
+                if (ReferenceEquals(material, fill) || FireCut.IsCharred(material)) previousFlesh.Add(material);
+                else if (FireCut.IsRim(material) || piece.family.skin.Count > 0 && HotSteel.IsHotSteel(material)) capOverlays.Add(material);
+            }
+            job.task = Task.Run(() => CutWork.SliceAndPrepareWithSkin(data, skel, point, normal, capFill, hitBody, metal, steel, -1, null, burn,
+                                                                burnField, hair: hair, skinBodies: skinBodies, skinMaterials: piece.family.usesNativeSkin ? piece.family.skin : null,
+                                                                previousFlesh: previousFlesh, capOverlays: capOverlays));
             jobs.Add(job);
         }
 

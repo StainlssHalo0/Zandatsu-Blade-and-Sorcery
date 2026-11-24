@@ -11,8 +11,8 @@ namespace Zandatsu
     /// </summary>
     public static class HotSteel
     {
-        public const float CoolSeconds = 12f;
-        public const float PlainBladeHeat = 0.5f;   // on the heat scale below: dull red, no bloom (fire: up to 1, white-hot)
+        public const float CoolSeconds = 3f;
+        public const float PlainBladeHeat = 0.14f;   // faint red, cold after 0.42 s (fire: up to 1, white-hot)
         private const string TextureFile = "HotSteel.png";
         private const string Name = "Zandatsu_HotSteel";
 

@@ -1,4 +1,5 @@
 using System;
+using Clipper2Lib;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -27,6 +28,9 @@ namespace Zandatsu
         // subTag: source renderer << 8 | submesh, or -1 for caps and untracked data; submeshes only merge with equal tags.
         public List<VertexOrigin> o;
         public List<int> subTag = new List<int>();
+        internal readonly Dictionary<int, (MeshCache mesh, int sub, int first)> sourceTopology =
+            new Dictionary<int, (MeshCache, int, int)>();
+        internal List<Vector3> closurePose; // Loose piece: weld UV seams in its bind pose before intersecting the current pose.
 
         public MeshData(int capacity = 1024, bool trackOrigins = false)
         {
@@ -146,6 +150,8 @@ namespace Zandatsu
             m.mats.Clear();
             m.blocks.Clear();
             m.subTag.Clear();
+            m.sourceTopology.Clear();
+            m.closurePose = null;
             lock (pool)
             {
                 if (pool.Contains(m)) return;
@@ -283,6 +289,7 @@ namespace Zandatsu
             return new MeshData(0)
             {
                 v = verts,
+                closurePose = v,
                 n = norms.Count == verts.Count ? norms : new List<Vector3>(n),
                 t = tans.Count == verts.Count ? tans : new List<Vector4>(t),
                 uv = uv,
@@ -755,7 +762,16 @@ namespace Zandatsu
         public static bool Slice(MeshData src, Vector3 point, Vector3 normal, Material fill, out MeshData pos, out MeshData neg,
             sbyte[] forced = null, HashSet<Material> metal = null, Material steel = null, List<VolumeShape>[] volumes = null,
             Material burn = null, BurnField burnField = null, bool holes = false, float hollow = 0f, Material inside = null,
-            bool clipForcedSeams = false, HashSet<Material> hair = null)
+            bool clipForcedSeams = false, HashSet<Material> hair = null) =>
+            SliceWithSkin(src, point, normal, fill, out pos, out neg, forced, metal, steel, volumes, burn, burnField,
+                          holes, hollow, inside, clipForcedSeams, hair);
+
+        internal static bool SliceWithSkin(MeshData src, Vector3 point, Vector3 normal, Material fill, out MeshData pos, out MeshData neg,
+            sbyte[] forced = null, HashSet<Material> metal = null, Material steel = null, List<VolumeShape>[] volumes = null,
+            Material burn = null, BurnField burnField = null, bool holes = false, float hollow = 0f, Material inside = null,
+            bool clipForcedSeams = false, HashSet<Material> hair = null, HashSet<int> skinBodies = null,
+            HashSet<Material> skinMaterials = null,
+            HashSet<Material> previousFlesh = null, HashSet<Material> capOverlays = null)
         {
             pos = null;
             neg = null;
@@ -793,8 +809,10 @@ namespace Zandatsu
             if (groups.Count == 0) return false;
             var parts = new Part[groups.Count];
             sbyte[] keepWhole = clipForcedSeams ? null : forced;
+            bool layered = skinMaterials != null;
             System.Threading.Tasks.Parallel.For(0, groups.Count, g =>
-                parts[g] = PlanGroup(src, groups[g], d, isPos, keepWhole, metal, steel, hair, mapPos, mapNeg));
+                parts[g] = PlanGroup(src, groups[g], d, isPos, keepWhole, metal, steel, hair, mapPos, mapNeg,
+                    layered ? skinMaterials : null, layered ? previousFlesh : null, layered ? fill : null, capOverlays));
 
             double tGroups = clock.Elapsed.TotalMilliseconds;
             var offPos = new int[parts.Length];
@@ -834,6 +852,9 @@ namespace Zandatsu
             VertexBuffers.Return(bufPos);
             VertexBuffers.Return(bufNeg);
             var segs = new List<Seg>(512);
+            var oldFaces = layered ? new List<Seg>() : null;
+            var skinSections = layered ? new List<List<Seg>>() : null;
+            int patchedRims = 0, patchSegments = 0;
             var metalSegs = new List<Seg>();
             int hairEdges = 0;
             for (int g = 0; g < parts.Length; g++)
@@ -845,7 +866,16 @@ namespace Zandatsu
                     pos.AddTriangles(src.mats[sub], src.blocks[sub], Offset(part.lp[k], offPos[g]), src.subTag[sub]);
                     neg.AddTriangles(src.mats[sub], src.blocks[sub], Offset(part.ln[k], offNeg[g]), src.subTag[sub]);
                 }
-                segs.AddRange(part.segs);
+                if (layered)
+                {
+                    oldFaces.AddRange(part.fleshSegs);
+                    skinSections.AddRange(part.skinSections);
+                    patchedRims += part.patchedRims;
+                    patchSegments += part.patchSegments;
+                    segs.AddRange(part.skinSegs);
+                    segs.AddRange(part.fleshSegs);
+                }
+                else segs.AddRange(part.segs);
                 metalSegs.AddRange(part.metalSegs);
                 hairEdges += part.hairEdges;
             }
@@ -860,7 +890,13 @@ namespace Zandatsu
             }
 
             double tTris = clock.Elapsed.TotalMilliseconds;
-            int holesFound = !ReferenceEquals(fill, null) && segs.Count > 0 ? BuildCaps(segs, normal, fill, pos, neg, holes, hollow, inside) : 0;
+            int holesFound = !ReferenceEquals(fill, null) && !layered && segs.Count > 0
+                ? BuildCaps(segs, normal, fill, pos, neg, holes, hollow, inside) : 0;
+            if (!ReferenceEquals(fill, null) && layered && segs.Count > 0)
+            {
+                BuildSectionCaps(segs, skinSections, oldFaces, normal, fill, pos, neg);
+                capShape += $", {patchedRims} sealed skin rims, {patchSegments} closure segments";
+            }
             if (!ReferenceEquals(burn, null) && burnField == null && segs.Count > 0) BuildBurnEdge(segs, normal, burn, pos, neg);
             // The rim on the cut face itself also covers flesh only the body fill makes, so it comes after the fill.
             List<Seg> fleshSegs = !ReferenceEquals(burn, null) && burnField != null ? new List<Seg>(segs) : null;
@@ -868,11 +904,12 @@ namespace Zandatsu
             double tCaps = clock.Elapsed.TotalMilliseconds;
             if (metalSegs.Count > 0) BuildRings(metalSegs, normal, steel, pos, neg);
             double tRings = clock.Elapsed.TotalMilliseconds;
-            // Not under a hollow object's cut face (a cup, a basket): the fill spans its outline and covered the hole.
-            if (!ReferenceEquals(fill, null) && segs.Count + metalSegs.Count > 0 && holesFound == 0)
+            // Object and weapon caps already follow their exact outlines, including concave edges and holes.
+            // Convex body fill is for missing skin under clothing: on a concave prop it extended past the surface.
+            if (!layered && !holes && !ReferenceEquals(fill, null) && segs.Count + metalSegs.Count > 0 && holesFound == 0)
             {
                 segs.AddRange(metalSegs);
-                BuildBodyFill(segs, normal, fill, pos, neg, volumes, fillRegions);
+                BuildBodyFill(segs, normal, fill, pos, neg, volumes, fillRegions, skinBodies);
             }
             double tFill = clock.Elapsed.TotalMilliseconds;
             if (fleshSegs != null) BuildBurnCap(fleshSegs, normal, burn, pos, neg, burnField, fillRegions);
@@ -890,6 +927,9 @@ namespace Zandatsu
             public readonly List<int> posOrder = new List<int>(), negOrder = new List<int>();
             public readonly List<Lerp> lerps = new List<Lerp>();
             public readonly List<Seg> segs = new List<Seg>(), metalSegs = new List<Seg>();
+            public readonly List<Seg> skinSegs = new List<Seg>(), fleshSegs = new List<Seg>();
+            public readonly List<List<Seg>> skinSections = new List<List<Seg>>();
+            public int patchedRims, patchSegments;
             public int hairEdges;
             public readonly List<int> subIndex = new List<int>();   // source submesh of lp[k] / ln[k]
             public readonly List<List<int>> lp = new List<List<int>>(), ln = new List<List<int>>();
@@ -974,16 +1014,28 @@ namespace Zandatsu
         /// Every decision is the one slicing made before; only the vertex data is written later (Write).
         /// </summary>
         private static Part PlanGroup(MeshData src, List<int> group, float[] d, bool[] isPos, sbyte[] forced,
-            HashSet<Material> metal, Material steel, HashSet<Material> hair, int[] mapPos, int[] mapNeg)
+            HashSet<Material> metal, Material steel, HashSet<Material> hair, int[] mapPos, int[] mapNeg,
+            HashSet<Material> skin, HashSet<Material> previousFlesh, Material fill, HashSet<Material> capOverlays)
         {
             var part = new Part();
             List<int> pos = part.posOrder, neg = part.negOrder;
-            List<Seg> segs = part.segs, metalSegs = part.metalSegs;
             foreach (int s in group)
             {
                 List<int> tris = src.subs[s];
-                bool isMetal = !ReferenceEquals(steel, null) && metal != null && metal.Contains(src.mats[s]);
-                bool isHair = hair != null && hair.Contains(src.mats[s]);
+                Material material = src.mats[s];
+                bool isMetal = !ReferenceEquals(steel, null) && metal != null && metal.Contains(material);
+                bool isHair = hair != null && hair.Contains(material);
+                bool isOverlay = capOverlays != null && capOverlays.Contains(material);
+                List<Seg> section = part.segs;
+                if (isMetal) section = part.metalSegs;
+                else if (skin != null)
+                {
+                    if (skin.Contains(material)) section = part.skinSegs;
+                    else if ((!ReferenceEquals(fill, null) && ReferenceEquals(material, fill)) ||
+                             (previousFlesh != null && previousFlesh.Contains(material))) section = part.fleshSegs;
+                }
+                bool nativeSkin = ReferenceEquals(section, part.skinSegs);
+                int skinStart = part.skinSegs.Count;
                 var lp = new List<int>(tris.Count);
                 var ln = new List<int>(tris.Count / 2);
                 for (int k = 0; k + 2 < tris.Count; k += 3)
@@ -1047,20 +1099,69 @@ namespace Zandatsu
                         part.hairEdges++;
                         continue;
                     }
-                    (isMetal ? metalSegs : segs).Add(new Seg
+                    if (isOverlay) continue;
+                    var segment = new Seg
                     {
                         a = Vector3.LerpUnclamped(src.v[x], src.v[y], txy),
                         b = Vector3.LerpUnclamped(src.v[x], src.v[z], txz),
                         wa = wxy,
                         wb = wxz,
                         n = src.n.Count > Math.Max(x, Math.Max(y, z)) ? src.n[x] + src.n[y] + src.n[z] : Vector3.zero
-                    });
+                    };
+                    if (!xPos && (nativeSkin || ReferenceEquals(section, part.fleshSegs))) Reverse(ref segment);
+                    section.Add(segment);
+                }
+                if (nativeSkin && part.skinSegs.Count > skinStart)
+                {
+                    var volumeSection = part.skinSegs.GetRange(skinStart, part.skinSegs.Count - skinStart);
+                    ClosedSkin closure;
+                    int first = 0;
+                    if (src.sourceTopology.TryGetValue(s, out var source))
+                    {
+                        closure = source.mesh.GetClosedSkin(source.sub);
+                        first = source.first;
+                    }
+                    else closure = ClosedSkin.Build(src.closurePose ?? src.v, tris);
+                    part.patchedRims += closure.closedRims;
+                    part.patchSegments += IntersectClosure(closure, first, src, d, isPos, forced, volumeSection);
+                    part.skinSections.Add(volumeSection);
                 }
                 part.subIndex.Add(s);
                 part.lp.Add(lp);
                 part.ln.Add(ln);
             }
             return part;
+        }
+
+        private static void Reverse(ref Seg s)
+        {
+            (s.a, s.b) = (s.b, s.a);
+            (s.wa, s.wb) = (s.wb, s.wa);
+        }
+
+        // Intersect virtual patch triangles with the same signed distances and side restrictions
+        // as the visible skin. These triangles never enter a renderer, collider or ragdoll recipe.
+        private static int IntersectClosure(ClosedSkin closure, int first, MeshData src, float[] d, bool[] isPos,
+            sbyte[] forced, List<Seg> section)
+        {
+            int start = section.Count;
+            var tris = closure.triangles;
+            for (int i = 0; i < tris.Count; i += 3)
+            {
+                int x = first + tris[i], y = first + tris[i+1], z = first + tris[i+2];
+                if (isPos[x] == isPos[y] && isPos[y] == isPos[z]) continue;
+                if (forced != null && (forced[x] != 0 || forced[y] != 0 || forced[z] != 0)) continue;
+                if (isPos[x] == isPos[y]) (x,y,z) = (z,x,y);
+                else if (isPos[x] == isPos[z]) (x,y,z) = (y,z,x);
+                float t = d[x] / (d[x]-d[y]), q = d[x] / (d[x]-d[z]);
+                var segment = new Seg {
+                    a = Vector3.LerpUnclamped(src.v[x], src.v[y], t), b = Vector3.LerpUnclamped(src.v[x], src.v[z], q),
+                    wa = Weights.Lerp(src.w[x], src.w[y], t), wb = Weights.Lerp(src.w[x], src.w[z], q)
+                };
+                if (!isPos[x]) Reverse(ref segment);
+                section.Add(segment);
+            }
+            return section.Count - start;
         }
 
         /// <summary>Local index of source vertex i on one side (planned on first use).</summary>
@@ -1185,14 +1286,14 @@ namespace Zandatsu
         }
 
         private static int BuildCaps(List<Seg> segs, Vector3 normal, Material fill, MeshData pos, MeshData neg, bool holes,
-            float hollow, Material inside)
+            float hollow, Material inside, float joinDistance = JoinDistance)
         {
             Loops(segs, out List<Vector3> pts, out List<BoneWeight> ptW, out int[] segA, out int[] segB);
             Plane(normal, out Vector3 t1, out Vector3 t2);
             var capPos = new List<int>();
             var capNeg = new List<int>();
             // Outlines are clipped independently (in parallel), then added in order.
-            List<List<int>> outlines = Outlines(segs.Count, pts, segA, segB);
+            List<List<int>> outlines = Outlines(segs.Count, pts, segA, segB, joinDistance);
             int joined = 0, found = outlines.Count;
             if (holes && outlines.Count > 1) outlines = WithHoles(outlines, segs, segA, segB, pts, normal, t1, t2, out joined);
             capShape = $"{found} outlines" + (joined > 0 ? $", {joined} holes" : "");
@@ -1240,6 +1341,174 @@ namespace Zandatsu
             pos.AddTriangles(inside, null, inPos);
             neg.AddTriangles(inside, null, inNeg);
             return joined + insides.Count;
+        }
+
+        // Repair and merge projected outlines before triangulating one continuous flesh cap.
+        private static void BuildSectionCaps(List<Seg> surface, List<List<Seg>> skinSections, List<Seg> oldFaces, Vector3 normal, Material fill,
+            MeshData pos, MeshData neg)
+        {
+            const double Scale = 100000.0; // 0.01 mm integer precision in the wound plane.
+            Plane(normal, out Vector3 u, out Vector3 v);
+            Point64 Key(Vector3 p) => new Point64((long)Math.Round(Vector3.Dot(p,u)*Scale), (long)Math.Round(Vector3.Dot(p,v)*Scale));
+            Paths64 Paths(List<Seg> segments)
+            {
+                var paths = new Paths64();
+                if (segments.Count == 0) return paths;
+                Loops(segments, out List<Vector3> points, out _, out int[] a, out int[] b);
+                foreach (var outline in Outlines(segments.Count, points, a, b))
+                {
+                    var path = new Path64(outline.Count);
+                    foreach (int id in outline)
+                    {
+                        Point64 p = Key(points[id]);
+                        if (path.Count == 0 || path[path.Count-1] != p) path.Add(p);
+                    }
+                    if (path.Count > 2 && path[0] == path[path.Count-1]) path.RemoveAt(path.Count-1);
+                    if (path.Count < 3) continue;
+                    if (Clipper.Area(path) < 0) path.Reverse();
+                    paths.Add(path);
+                }
+                // Also resolves crossing and self-touching outlines left by skinned joint boundaries.
+                return Clipper.Union(paths, FillRule.NonZero);
+            }
+            // Each closed body part has its own winding. Union the sections after tracing them:
+            // at a wrist or waist two adjoining end faces can contribute the same line in opposite directions.
+            // On a recut the old flesh faces are part of the physical skin boundary.
+            // Prefer that exact loop when available, particularly for pieces made entirely of wound faces.
+            var section = ClosedSection(surface, Key);
+            var samples = new List<Seg>(surface.Count);
+            if (section != null) samples.AddRange(surface);
+            else
+            {
+                var bodyPaths = new Paths64();
+                foreach (var volume in skinSections)
+                {
+                    bodyPaths.AddRange(ClosedSection(volume, Key) ?? Paths(volume));
+                    samples.AddRange(volume);
+                }
+                if (oldFaces.Count > 0)
+                {
+                    bodyPaths.AddRange(Paths(surface));
+                    samples.AddRange(oldFaces);
+                }
+                section = Clipper.Union(bodyPaths, FillRule.NonZero);
+            }
+            var positions = new Dictionary<Point64, (Vector3 p, BoneWeight w)>();
+            var exact = new Dictionary<Point64, (Vector3 p, BoneWeight w)>();
+            foreach (var segment in samples)
+            {
+                if (!exact.ContainsKey(Key(segment.a))) exact.Add(Key(segment.a), (segment.a,segment.wa));
+                if (!exact.ContainsKey(Key(segment.b))) exact.Add(Key(segment.b), (segment.b,segment.wb));
+            }
+            (Vector3 p, BoneWeight w) Sample(Point64 key)
+            {
+                if (positions.TryGetValue(key,out var value)) return value;
+                if (exact.TryGetValue(key,out value)) { positions.Add(key,value); return value; }
+                var q = new Vector2((float)(key.X/Scale),(float)(key.Y/Scale));
+                float best = float.PositiveInfinity;
+                value = (Vector3.zero, Weights.Single(0));
+                foreach (var segment in samples)
+                {
+                    Vector2 a = new Vector2(Vector3.Dot(segment.a,u),Vector3.Dot(segment.a,v));
+                    Vector2 b = new Vector2(Vector3.Dot(segment.b,u),Vector3.Dot(segment.b,v));
+                    Vector2 d = b-a;
+                    float t = d.sqrMagnitude > 1e-16f ? Mathf.Clamp01(Vector2.Dot(q-a,d)/d.sqrMagnitude) : 0f;
+                    float distance = (a+d*t-q).sqrMagnitude;
+                    if (distance >= best) continue;
+                    best = distance;
+                    Vector3 p = Vector3.LerpUnclamped(segment.a,segment.b,t);
+                    value = (u*q.x+v*q.y+normal*Vector3.Dot(p,normal), Weights.Lerp(segment.wa,segment.wb,t));
+                }
+                positions.Add(key,value);
+                return value;
+            }
+            var positive = new Dictionary<Point64,int>();
+            var negative = new Dictionary<Point64,int>();
+            int Vertex(MeshData mesh, Dictionary<Point64,int> map, Point64 key, Vector3 facing)
+            {
+                if (map.TryGetValue(key,out int id)) return id;
+                var sample = Sample(key);
+                id = mesh.AddVertex(sample.p,facing,new Vector4(u.x,u.y,u.z,1f),CapUV(sample.p,u,v),sample.w);
+                map.Add(key,id);
+                return id;
+            }
+            bool Emit(Paths64 paths, Material material)
+            {
+                if (paths.Count == 0 || ReferenceEquals(material,null)) return true;
+                var result = Clipper.Triangulate(paths,out Paths64 triangles,false);
+                if (result != TriangulateResult.success) { capShape += $", triangulation {result}"; return false; }
+                var pt = new List<int>(triangles.Count*3); var nt = new List<int>(triangles.Count*3);
+                foreach (var triangle in triangles)
+                {
+                    if (triangle.Count != 3) continue;
+                    bool ccw = Clipper.Area(triangle) > 0;
+                    var a = triangle[0]; var b = triangle[ccw ? 1 : 2]; var c = triangle[ccw ? 2 : 1];
+                    pt.Add(Vertex(pos,positive,a,-normal)); pt.Add(Vertex(pos,positive,c,-normal)); pt.Add(Vertex(pos,positive,b,-normal));
+                    nt.Add(Vertex(neg,negative,a,normal)); nt.Add(Vertex(neg,negative,b,normal)); nt.Add(Vertex(neg,negative,c,normal));
+                }
+                pos.AddTriangles(material,null,pt); neg.AddTriangles(material,null,nt);
+                return true;
+            }
+            capShape = $"skin {section.Count} contours";
+            if (!Emit(section, fill))
+                BuildCaps(samples, normal, fill, pos, neg, false, 0f, null);
+        }
+
+        // Winding of the skin triangles distinguishes an interior void from a second body.
+        // The older outline repair is still needed for branching, partially cut or non-manifold sources.
+        private static Paths64 ClosedSection(List<Seg> segments, Func<Vector3, Point64> key)
+        {
+            var outgoing = new Dictionary<Point64, Point64>();
+            var incoming = new HashSet<Point64>();
+            foreach (var segment in segments)
+            {
+                Point64 a = key(segment.a), b = key(segment.b);
+                if (a == b) continue;
+                if (outgoing.ContainsKey(a) || !incoming.Add(b)) return null;
+                outgoing.Add(a,b);
+            }
+            // Connect the actual cut skin across modular seams before considering virtual end
+            // faces. Sub-millimetre pose/rounding differences can separate corresponding ends.
+            // Require a unique match in both directions; unrelated contours remain independent.
+            var starts = new List<Point64>();
+            foreach (var a in outgoing.Keys) if (!incoming.Contains(a)) starts.Add(a);
+            if (starts.Count != 0)
+            {
+                var joins = new Dictionary<Point64,Point64>();
+                var used = new HashSet<Point64>();
+                const double maxGapSquared = 75 * 75; // 0.75 mm at 100000 units/metre
+                foreach (var b in incoming)
+                {
+                    if (outgoing.ContainsKey(b)) continue;
+                    int found = -1;
+                    for (int i = 0; i < starts.Count; i++)
+                    {
+                        double dx = starts[i].X-b.X, dy = starts[i].Y-b.Y;
+                        if (dx*dx+dy*dy > maxGapSquared) continue;
+                        if (found >= 0) return null;
+                        found = i;
+                    }
+                    if (found < 0 || !used.Add(starts[found])) return null;
+                    joins.Add(b,starts[found]);
+                }
+                foreach (var pair in joins) outgoing.Add(pair.Key,pair.Value);
+            }
+            var seen = new HashSet<Point64>();
+            var paths = new Paths64();
+            foreach (var first in outgoing.Keys)
+            {
+                if (seen.Contains(first)) continue;
+                var path = new Path64();
+                var current = first;
+                while (seen.Add(current))
+                {
+                    path.Add(current);
+                    if (!outgoing.TryGetValue(current, out current)) return null;
+                }
+                if (current != first) return null;
+                if (path.Count >= 3) paths.Add(path);
+            }
+            return Clipper.Union(paths, FillRule.NonZero);
         }
 
         /// <summary>
@@ -1501,7 +1770,7 @@ namespace Zandatsu
         private const float MinOutlineStep = 0.0003f;   // m, closer outline points are merged before clipping
 
         /// <summary>Closed outlines as ordered point ids (the closing edge last -> first is implicit).</summary>
-        private static List<List<int>> Outlines(int segCount, List<Vector3> pts, int[] segA, int[] segB)
+        private static List<List<int>> Outlines(int segCount, List<Vector3> pts, int[] segA, int[] segB, float joinDistance = JoinDistance)
         {
             var seen = new HashSet<long>();
             var ea = new List<int>(segCount);
@@ -1568,7 +1837,7 @@ namespace Zandatsu
             foreach (int node in nodes) while (left[node] % 2 == 1) Walk(node);
             foreach (int node in nodes) while (left[node] > 0) Walk(node);
 
-            Bridge(open, closed, pts);
+            Bridge(open, closed, pts, joinDistance);
             return closed;
         }
 
@@ -1579,15 +1848,15 @@ namespace Zandatsu
         /// distance does exactly that. It used to search all pairs again after every join: cubic in the number of chains,
         /// and ragged cloth along a seam gives hundreds of them (60 ms in one cut, 0.6 s for 400 chains offline).
         /// </summary>
-        private static void Bridge(List<List<int>> open, List<List<int>> closed, List<Vector3> pts)
+        private static void Bridge(List<List<int>> open, List<List<int>> closed, List<Vector3> pts, float joinDistance)
         {
             int k = open.Count;
             if (k == 0) return;
-            float maxSq = JoinDistance * JoinDistance;
+            float maxSq = joinDistance * joinDistance;
             // End e = chain * 2 + (0 start, 1 last); the grid finds ends near each other.
             Vector3 EndPos(int e) => pts[(e & 1) == 0 ? open[e >> 1][0] : open[e >> 1][open[e >> 1].Count - 1]];
-            Vector3Int Cell(Vector3 p) => new Vector3Int(Mathf.FloorToInt(p.x / JoinDistance), Mathf.FloorToInt(p.y / JoinDistance),
-                                                         Mathf.FloorToInt(p.z / JoinDistance));
+            Vector3Int Cell(Vector3 p) => new Vector3Int(Mathf.FloorToInt(p.x / joinDistance), Mathf.FloorToInt(p.y / joinDistance),
+                                                         Mathf.FloorToInt(p.z / joinDistance));
             var grid = new Dictionary<Vector3Int, List<int>>();
             for (int e = 0; e < k * 2; e++)
             {
@@ -2328,7 +2597,7 @@ namespace Zandatsu
         private const float FillCell = 0.05f;           // m, cluster grid: occupied neighbouring cells join
 
         private static void BuildBodyFill(List<Seg> segs, Vector3 normal, Material fill, MeshData pos, MeshData neg,
-            List<VolumeShape>[] volumes, List<FillRegion> regions = null)
+            List<VolumeShape>[] volumes, List<FillRegion> regions = null, HashSet<int> skinBodies = null)
         {
             Loops(segs, out List<Vector3> pts, out List<BoneWeight> ptW, out _, out _);
             Plane(normal, out Vector3 t1, out Vector3 t2);
@@ -2353,6 +2622,7 @@ namespace Zandatsu
             for (int i = 0; i < pts.Count; i++)
             {
                 int body = Dominant(ptW[i]);
+                if (skinBodies != null && skinBodies.Contains(body)) { ptCell[i] = -1; continue; }
                 Vector3 p = pts[i] / FillCell;
                 int cx = Mathf.FloorToInt(p.x), cy = Mathf.FloorToInt(p.y), cz = Mathf.FloorToInt(p.z);
                 long key = Key(body, cx, cy, cz);
@@ -2382,6 +2652,7 @@ namespace Zandatsu
             var clusters = new Dictionary<int, List<int>>();
             for (int i = 0; i < pts.Count; i++)
             {
+                if (ptCell[i] < 0) continue;
                 int r = FindCell(ptCell[i]);
                 if (!clusters.TryGetValue(r, out List<int> list)) clusters[r] = list = new List<int>();
                 list.Add(i);
@@ -2401,6 +2672,7 @@ namespace Zandatsu
                 for (int i = 0; i < pts.Count; i++)
                 {
                     int body = Dominant(ptW[i]);
+                    if (skinBodies != null && skinBodies.Contains(body)) continue;
                     if (body < 0 || body >= volumes.Length || volumes[body] == null || volumes[body].Count == 0) continue;
                     if (!byBody.TryGetValue(body, out List<int> list)) byBody[body] = list = new List<int>();
                     list.Add(i);

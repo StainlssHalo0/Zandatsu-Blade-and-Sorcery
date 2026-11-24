@@ -4,7 +4,7 @@
     <LangVersion>9.0</LangVersion>
     <AssemblyName>Zandatsu</AssemblyName>
     <RootNamespace>Zandatsu</RootNamespace>
-    <Nullable>disable</Nullable>
+    <Nullable>annotations</Nullable>
     <DebugType>portable</DebugType>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <Compile Include="src\**\*.cs" />
+    <Compile Include="third_party\Clipper2\*.cs" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
   </ItemGroup>
 
@@ -49,5 +50,7 @@
     <Copy SourceFiles="$(OutDir)Zandatsu.dll;$(OutDir)Zandatsu.pdb;manifest.json;assets\thumbnail.png;assets\HotSteel.png;assets\BurnEdge.png;assets\zandatsu.shaders" DestinationFolder="$(ModOut)" />
     <ItemGroup><CapTexture Include="assets\caps\*.png" /></ItemGroup>
     <Copy SourceFiles="@(CapTexture)" DestinationFolder="$(ModOut)\caps" />
+    <Copy SourceFiles="third_party\Clipper2\LICENSE.txt" DestinationFiles="$(ModOut)\Clipper2-LICENSE.txt" />
+    <Copy SourceFiles="third_party\Clipper2\NOTICES.txt" DestinationFiles="$(ModOut)\Clipper2-NOTICES.txt" />
   </Target>
 </Project>

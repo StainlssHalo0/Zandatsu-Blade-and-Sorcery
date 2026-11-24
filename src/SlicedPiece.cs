@@ -17,6 +17,11 @@ namespace Zandatsu
         public readonly List<Object> owned = new List<Object>();
         public readonly HashSet<Material> metal = new HashSet<Material>();   // metal armour materials + hot steel
         public readonly HashSet<Material> hair = new HashSet<Material>();
+        public readonly HashSet<string> skinBodyNames = new HashSet<string>();
+        public readonly HashSet<Material> skin = new HashSet<Material>();
+        internal bool usesNativeSkin;
+        internal readonly HashSet<Material> previousFlesh = new HashSet<Material>();
+        internal readonly HashSet<Material> capOverlays = new HashSet<Material>();
         public PhysicMaterial defaultPhysicMaterial;
         public int pendingCuts;
         // Colliders of creature parts this family was cut out of (hybrid cut): still full size on the corpse, so they

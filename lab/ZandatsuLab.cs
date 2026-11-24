@@ -6,6 +6,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using ThunderRoad;
+using ThunderRoad.Manikin;
 using ThunderRoad.Skill.Spell;
 using UnityEngine;
 
@@ -174,7 +175,7 @@ namespace ZandatsuLab
                 ["PlainBladeHeatsSteel"] = true, ["HybridCuts"] = true, ["LimbCutsNotFatal"] = true, ["BleedOutTime"] = 20f,
                 ["VanillaDismemberment"] = false, ["SlowMotionOnCut"] = false, ["CutSound"] = true, ["SeparationSpeed"] = 1f,
                 ["MaxPieces"] = 60, ["PieceLifetime"] = 120f, ["GrabPieces"] = true, ["PieceStiffness"] = 1f, ["DebugKey"] = false,
-                ["TearLimbs"] = true
+                ["TearLimbs"] = true, ["CheesePull"] = true
             };
             defaults = new Dictionary<FieldInfo, object>();
             foreach (var kv in declared)
@@ -188,7 +189,8 @@ namespace ZandatsuLab
             foreach (string raw in names)
             {
                 string name = raw.Trim();
-                MethodInfo m = GetType().GetMethod("S_" + name, BindingFlags.NonPublic | BindingFlags.Instance);
+                string scenario = name.StartsWith("plate_cap_", StringComparison.Ordinal) ? name.Substring("plate_".Length) : name;
+                MethodInfo m = GetType().GetMethod("S_" + scenario, BindingFlags.NonPublic | BindingFlags.Instance);
                 if (m == null) { summary.Add($"SKIP {name}: no such scenario"); continue; }
                 Begin(name);
                 yield return Guard((IEnumerator)m.Invoke(this, null));
@@ -256,6 +258,481 @@ namespace ZandatsuLab
         }
 
         /// <summary>Metal chest armour: cut through (Cut Through Armour), the cut steel glows.</summary>
+        private IEnumerator S_body_horizontal() => BodyUnderArmour(0);
+
+        private IEnumerator S_body_oblique() => BodyUnderArmour(1);
+        private IEnumerator S_body_vertical() => BodyUnderArmour(2);
+        private IEnumerator S_body_pelvis() => BodyUnderArmour(3);
+        private IEnumerator S_body_female_armour() => BodyUnderArmour(2, "HumanFemale");
+        private IEnumerator S_body_female_clothes() => BodyUnderArmour(3, "HumanFemale", "ApparelCivilianChest");
+        private IEnumerator S_body_female_chest() => BodyUnderArmour(0, "HumanFemale", "ApparelCivilianChest");
+        private IEnumerator S_body_female_vertical() => BodyUnderArmour(2, "HumanFemale", "ApparelCivilianChest");
+        private IEnumerator S_body_full_plate() => BodyUnderArmour(2, wear: "full plate");
+        private IEnumerator S_body_full_plate_horizontal() => BodyUnderArmour(0, wear: "full plate");
+        private IEnumerator S_plate_cross_wound() => BodyUnderArmour(0, wear: "full plate", crossWound: true);
+        private IEnumerator S_body_recut_clothes() => BodyUnderArmour(0, wear: "ApparelCivilianChest", recuts: 3);
+
+        private IEnumerator BodyUnderArmour(int angle, string creatureId = "HumanMale", string wear = MetalChest, int recuts = 1,
+            bool crossWound = false)
+        {
+            Creature c = null;
+            yield return Enemy(x => c = x, wear, creatureId: creatureId);
+            if (!c) yield break;
+            yield return Wait(1f);
+            var bodyType = ZType("ArmourBody");
+            var hasBody = bodyType.GetMethod("HasBody", BindingFlags.Static | BindingFlags.NonPublic);
+            if (wear == "full plate")
+                Note("plate wardrobe", string.Join(", ", c.manikinLocations.partLocations.Select(p =>
+                    $"{p.Key.channel}:{p.Key.layer}={p.Value.name}")));
+            Expect("complete native body loaded", (bool)hasBody.Invoke(null, new object[] { c }),
+                   string.Join(", ", c.renderers.Where(r => r?.renderer).Select(r => r.renderer.name)));
+            var isSkin = bodyType.GetMethod("IsSkinRenderer", BindingFlags.Static | BindingFlags.NonPublic);
+            var originalSkins = c.renderers.Where(r => r?.renderer && r.renderer.name.EndsWith("LOD0") &&
+                (bool)isSkin.Invoke(null, new object[] { c, r.renderer }))
+                .Select(r => r.renderer).Distinct().ToDictionary(r => r, r => new HashSet<Vector3>(r.sharedMesh.vertices));
+            var chest = c.GetComponentsInChildren<SkinnedMeshRenderer>().FirstOrDefault(r => r.name == "Chest_LOD0");
+            Expect("native torso loaded under clothing", chest && chest.enabled && !chest.forceRenderingOff, chest ? chest.name : "missing");
+            if (!chest) yield break;
+            Note("torso morphs", string.Join(", ", Enumerable.Range(0, chest.sharedMesh.blendShapeCount)
+                .Select(i => $"{chest.sharedMesh.GetBlendShapeName(i)}={chest.GetBlendShapeWeight(i)}")));
+            CheckWardrobeFit(c);
+            if (wear == "full plate") CheckSkinTopology(originalSkins.Keys);
+            Mesh before = chest.sharedMesh;
+            yield return Shot("before", c);
+            if (creatureId == "HumanFemale")
+            {
+                yield return ShotNear("chest_front", chest.bounds.center, 0.85f, c.transform.forward);
+                yield return ShotNear("chest_side", chest.bounds.center, 0.85f, c.transform.right);
+            }
+            Item blade = null;
+            yield return SpawnItem(Sword, x => blade = x);
+            Vector3 axis = angle == 2 ? c.transform.up : (c.transform.right + c.transform.up * (angle == 1 ? 0.65f : 0f)).normalized;
+            Vector3 at = angle == 3 ? c.ragdoll.rootPart.transform.position + Vector3.up * 0.04f : Target(c, RagdollPart.Type.Torso);
+            yield return Swing(blade, at, axis, c.transform.forward, 12f, false);
+            yield return Wait(1f);
+            Expect("torso cut", Cuts(c) > 0, $"{Cuts(c)} cuts");
+            if (angle != 3)
+                Expect("native torso participated in cutting", !chest.enabled || chest.forceRenderingOff || chest.sharedMesh != before, chest.sharedMesh.name);
+            if (angle != 2) ExpectNotStretched();
+            yield return Shot("after", c);
+            // Keep the sword out of the cap photographs; it can look like an interior hole.
+            if (blade) blade.transform.position = PlayerFront(1f) + Vector3.up * 3f;
+            var cap = c.GetComponentsInChildren<SkinnedMeshRenderer>().LastOrDefault(r => r.name == "Zandatsu_CreatureCap");
+            Expect("retained body has a cap", cap, cap ? cap.name : "missing");
+            if (cap)
+            {
+                Expect("no fabric material on the wound", !cap.sharedMaterials.Any(m => m && m.name == "Zandatsu_ClothingLining"), cap.name);
+                int edgesChecked = 0;
+                foreach (var pair in originalSkins)
+                    if (pair.Key && pair.Key.enabled && !pair.Key.forceRenderingOff &&
+                        pair.Key.sharedMesh.vertices.Any(p => !pair.Value.Contains(p)))
+                    {
+                        CheckBodyCap(pair.Key, cap, pair.Value);
+                        edgesChecked++;
+                    }
+                Expect("native skin seam checked", edgesChecked > 0, $"{edgesChecked} skin renderers");
+                if (angle == 2)
+                {
+                    Vector3[] vertices = cap.sharedMesh.vertices;
+                    int[] indices = cap.sharedMesh.triangles;
+                    float area = 0f;
+                    for (int i = 0; i < indices.Length; i += 3)
+                        area += Vector3.Cross(vertices[indices[i + 1]] - vertices[indices[i]], vertices[indices[i + 2]] - vertices[indices[i]]).magnitude * 0.5f;
+                    Note("longitudinal cap area", $"{area:0.0000} m2");
+                    Expect("longitudinal cap has a filled interior", area > 0.08f, $"{area:0.0000} m2");
+                }
+                var bodies = c.ragdoll.parts.Where(p => p && p.physicBody != null && p.physicBody.rigidBody)
+                    .Select(p => p.physicBody.rigidBody).Distinct().ToArray();
+                yield return ShotRaisedCap(cap, 0, "body_cap", bodies);
+            }
+            Component big = Pieces().OrderByDescending(p => Size(p)).FirstOrDefault();
+            Expect("detached torso piece", big, $"{Pieces().Count} pieces");
+            if (!big) yield break;
+            if (wear == "full plate" && !crossWound)
+            {
+                var detached = big.GetComponentInChildren<SkinnedMeshRenderer>();
+                int slot = Array.IndexOf(detached.sharedMaterials, (Material)big.GetType().GetField("fill").GetValue(big));
+                Expect("detached plate body has flesh face", slot >= 0, $"material slot {slot}");
+                if (slot >= 0)
+                {
+                    CheckPlateInterior(big, detached, slot);
+                    yield return ShotRaisedCap(detached, slot, "piece_cap", big.GetComponentsInChildren<Rigidbody>());
+                }
+            }
+            if (recuts > 1 || crossWound)
+            {
+                var pieceType = ZType("SlicedPiece");
+                var generation = pieceType.GetField("generation");
+                var scriptType = ZType("ZandatsuScript");
+                var script = ModManager.loadedMods.SelectMany(m => m.thunderScripts).First(s => s.GetType() == scriptType);
+                var cut = scriptType.GetMethod("CutPiece", BindingFlags.Instance | BindingFlags.NonPublic);
+                for (int i = 1; i <= recuts && big; i++)
+                {
+                    var renderer = big.GetComponentInChildren<SkinnedMeshRenderer>();
+                    Vector3 normal = (i == 1 ? c.transform.right : i == 2 ? c.transform.forward : c.transform.up).normalized;
+                    // A detached renderer's fixed bounds can lag far behind its moving bones.
+                    Vector3[] posed = SkinWorldVertices(renderer);
+                    var skinPoints = new HashSet<int>();
+                    for (int s = 0; s < renderer.sharedMaterials.Length; s++)
+                        if (renderer.sharedMaterials[s] && renderer.sharedMaterials[s].name.StartsWith("LOD0_Human", StringComparison.Ordinal))
+                            skinPoints.UnionWith(renderer.sharedMesh.GetTriangles(s));
+                    Vector3 point = Vector3.zero;
+                    if (skinPoints.Count > 0)
+                    {
+                        foreach (int id in skinPoints) point += posed[id];
+                        point /= skinPoints.Count;
+                    }
+                    else
+                    {
+                        foreach (Vector3 vertex in posed) point += vertex;
+                        point /= posed.Length;
+                    }
+                    if (crossWound)
+                    {
+                        var oldFill = (Material)pieceType.GetField("fill").GetValue(big);
+                        int oldSlot = Array.IndexOf(renderer.sharedMaterials, oldFill);
+                        int[] face = oldSlot >= 0 ? renderer.sharedMesh.GetTriangles(oldSlot) : Array.Empty<int>();
+                        Expect("old flesh surface exists", face.Length >= 3, $"{face.Length / 3} triangles");
+                        if (face.Length < 3) yield break;
+                        int t = Enumerable.Range(0, face.Length / 3).Select(j => j * 3).OrderByDescending(j =>
+                            Vector3.Cross(posed[face[j+1]]-posed[face[j]],posed[face[j+2]]-posed[face[j]]).sqrMagnitude).First();
+                        Vector3 a = posed[face[t]], b = posed[face[t+1]], e = posed[face[t+2]];
+                        point = (a + b + e) / 3f;
+                        normal = (b - a).normalized;
+                        yield return ShotRaisedCap(renderer, oldSlot, "detached_old_cap", big.GetComponentsInChildren<Rigidbody>());
+                        // The photo routine temporarily moves the piece; sample its latest pose again.
+                        posed = SkinWorldVertices(renderer);
+                        a = posed[face[t]]; b = posed[face[t+1]]; e = posed[face[t+2]];
+                        point = (a+b+e)/3f;
+                        normal = (b-a).normalized;
+                    }
+                    cut.Invoke(script, new object[] { big, point, normal, Vector3.zero, blade, -1, 0f });
+                    yield return Wait(0.7f);
+                    var fresh = Pieces().Where(p => (int)generation.GetValue(p) == i)
+                        .OrderByDescending(p => Size(p)).ToArray();
+                    Expect("repeat cut produced both halves", fresh.Length >= 2, $"generation {i}, {fresh.Length} pieces");
+                    if (fresh.Length == 0) break;
+                    if (crossWound)
+                    {
+                        var sides = new HashSet<int>();
+                        foreach (var half in fresh)
+                        {
+                            var surface = half.GetComponentInChildren<SkinnedMeshRenderer>();
+                            int sub = Array.IndexOf(surface.sharedMaterials, (Material)pieceType.GetField("fill").GetValue(half));
+                            if (sub < 0) continue;
+                            var vertices = surface.sharedMesh.vertices;
+                            var ids = surface.sharedMesh.GetTriangles(sub);
+                            var onPlane = new List<int>();
+                            for (int j = 0; j < ids.Length; j += 3)
+                                if (Enumerable.Range(j,3).All(k => Mathf.Abs(Vector3.Dot(vertices[ids[k]]-point,normal)) < 0.0005f))
+                                    onPlane.AddRange(new[] { ids[j], ids[j+1], ids[j+2] });
+                            if (onPlane.Count == 0 || CapDistance(point, vertices, onPlane.ToArray()) > 0.002f) continue;
+                            float orientation = 0f;
+                            for (int k = 0; k < onPlane.Count; k += 3)
+                                orientation += Vector3.Dot(normal, Vector3.Cross(vertices[onPlane[k+1]]-vertices[onPlane[k]],
+                                    vertices[onPlane[k+2]]-vertices[onPlane[k]]));
+                            sides.Add(Math.Sign(orientation));
+                            yield return ShotRaisedCap(surface, sub, orientation > 0 ? "cross_front" : "cross_back",
+                                half.GetComponentsInChildren<Rigidbody>(), onPlane.ToArray());
+                        }
+                        Expect("both fresh flesh faces meet the interior of the old wound", sides.Contains(-1) && sides.Contains(1),
+                               string.Join(",",sides));
+                    }
+                    big = fresh[0];
+                    var sliced = big.GetComponentInChildren<SkinnedMeshRenderer>();
+                    Material fill = (Material)pieceType.GetField("fill").GetValue(big);
+                    int slot = Array.IndexOf(sliced.sharedMaterials, fill);
+                    var planarTriangles = new List<int>();
+                    if (slot >= 0)
+                    {
+                        Vector3[] vertices = sliced.sharedMesh.vertices;
+                        int[] triangles = sliced.sharedMesh.GetTriangles(slot);
+                        for (int t = 0; t < triangles.Length; t += 3)
+                            if (Enumerable.Range(t, 3).All(j =>
+                                Mathf.Abs(Vector3.Dot(vertices[triangles[j]] - point, normal)) < 0.0005f))
+                                planarTriangles.AddRange(new[] { triangles[t], triangles[t + 1], triangles[t + 2] });
+                    }
+                    Expect("new slice uses flesh material", planarTriangles.Count > 0, $"generation {i}, {planarTriangles.Count / 3} flesh triangles on the new plane");
+                    if (planarTriangles.Count > 0)
+                        yield return ShotRaisedCap(sliced, slot, $"recut_{i}", big.GetComponentsInChildren<Rigidbody>(), planarTriangles.ToArray());
+                }
+                ExpectNotStretched();
+                yield break;
+            }
+            for (int attempt = 0; attempt < 3 && !LogHas("re-cut piece"); attempt++)
+            {
+                yield return Swing(blade, Center(big), Vector3.right, Vector3.down, 12f, false);
+                yield return Wait(1f);
+            }
+            Expect("armoured body piece can be cut again", LogHas("re-cut piece"), $"{Pieces().Count} pieces");
+            if (angle != 2) ExpectNotStretched();
+        }
+
+        // Independent coverage check on the actual cut in its snapshot pose. Cast rays in
+        // four directions through the skin rim acquired from the detached half's native
+        // triangles. Ignore points close to a rim and ambiguous votes from open seams.
+        private void CheckPlateInterior(Component piece, SkinnedMeshRenderer renderer, int fill)
+        {
+            Mesh mesh = renderer.sharedMesh;
+            var flesh = mesh.GetTriangles(fill);
+            if (flesh.Length == 0) { Expect("flesh surface exists", false, "empty material slot"); return; }
+            Vector3[] pts = mesh.vertices;
+            Vector3 origin = pts[flesh[0]], n = mesh.normals[flesh[0]].normalized;
+            Vector3 u = Vector3.Cross(n, Mathf.Abs(n.y)<0.9f ? Vector3.up : Vector3.right).normalized, v = Vector3.Cross(n,u);
+            var xy = pts.Select(p => new Vector2(Vector3.Dot(p-origin,u),Vector3.Dot(p-origin,v))).ToArray();
+            object family = piece.GetType().GetField("family").GetValue(piece);
+            var skin = (HashSet<Material>)family.GetType().GetField("skin").GetValue(family);
+            var rim = new List<(Vector2 a,Vector2 b)>();
+            for (int s=0; s<mesh.subMeshCount; s++)
+            {
+                if (!skin.Contains(renderer.sharedMaterials[s])) continue;
+                int[] t = mesh.GetTriangles(s);
+                for (int j=0; j<t.Length; j+=3)
+                {
+                    int a=-1,b=-1,count=0;
+                    for (int k=0;k<3;k++)
+                        if (Mathf.Abs(Vector3.Dot(pts[t[j+k]]-origin,n)) < 0.00002f)
+                        { b=a; a=t[j+k]; count++; }
+                    if (count==2 && (xy[a]-xy[b]).sqrMagnitude>1e-12f) rim.Add((xy[a],xy[b]));
+                }
+            }
+            if (rim.Count==0) { Expect("native skin rim found",false,"no cut edges"); return; }
+            Vector2 lo=xy[flesh[0]], hi=lo;
+            foreach(var e in rim) { lo=Vector2.Min(lo,Vector2.Min(e.a,e.b)); hi=Vector2.Max(hi,Vector2.Max(e.a,e.b)); }
+            foreach(int k in flesh) { lo=Vector2.Min(lo,xy[k]); hi=Vector2.Max(hi,xy[k]); }
+            int interior=0, missed=0, outside=0, overflow=0;
+            float Cross(Vector2 a,Vector2 b) => a.x*b.y-a.y*b.x;
+            for(float x=lo.x+0.0031f; x<hi.x; x+=0.008f)
+                for(float y=lo.y+0.0043f; y<hi.y; y+=0.008f)
+                {
+                    var p=new Vector2(x,y);
+                    int l=0,r=0,t=0,b=0;
+                    bool near=false;
+                    foreach(var e in rim)
+                    {
+                        var d=e.b-e.a;
+                        if ((p-e.a-d*Mathf.Clamp01(Vector2.Dot(p-e.a,d)/d.sqrMagnitude)).sqrMagnitude < 0.000009f) { near=true; break; }
+                        if ((e.a.y>y)!=(e.b.y>y)) { if (e.a.x+(y-e.a.y)*d.x/d.y>x) r++; else l++; }
+                        if ((e.a.x>x)!=(e.b.x>x)) { if (e.a.y+(x-e.a.x)*d.y/d.x>y) t++; else b++; }
+                    }
+                    if (near || ((l^r | l^t | l^b)&1)!=0) continue;
+                    bool covered=false;
+                    for(int i=0; i<flesh.Length && !covered; i+=3)
+                    {
+                        Vector2 a=xy[flesh[i]], q=xy[flesh[i+1]], c=xy[flesh[i+2]];
+                        if (Mathf.Abs(Cross(q-a,c-a))<1e-12f) continue;
+                        float e1=Cross(q-a,p-a), e2=Cross(c-q,p-q), e3=Cross(a-c,p-c);
+                        covered = Mathf.Min(e1,e2,e3)>=-1e-10f || Mathf.Max(e1,e2,e3)<=1e-10f;
+                    }
+                    if ((l&1)==1) { interior++; if (!covered) missed++; }
+                    else { outside++; if (covered) overflow++; }
+                }
+            Expect("flesh covers sampled skin interior", interior>0 && missed==0, $"{missed}/{interior} uncovered");
+            Expect("flesh stays within sampled skin rim", outside>0 && overflow==0, $"{overflow}/{outside} exterior samples covered");
+        }
+
+        private void CheckSkinTopology(IEnumerable<SkinnedMeshRenderer> skins)
+        {
+            string[] anatomical = { "Chest_LOD0", "Legs_LOD0", "HandLeft_LOD0", "HandRight_LOD0", "Feet_LOD0", "Head_LOD0" };
+            var renderers = skins.Where(r => anatomical.Contains(r.name)).ToArray();
+            Expect("all six anatomical meshes present", renderers.Length == anatomical.Length, string.Join(", ", renderers.Select(r => r.name)));
+            var build = ZType("ClosedSkin").GetMethod("Build", BindingFlags.Static | BindingFlags.NonPublic);
+            var seams = new List<(int r, int vertex, Vector3 before)>();
+            for (int r = 0; r < renderers.Length; r++)
+            {
+                Mesh m = renderers[r].sharedMesh;
+                var posed = SkinWorldVertices(renderers[r]);
+                int bad = 0, added = 0;
+                for (int s = 0; s < m.subMeshCount; s++)
+                {
+                    int[] faces = m.GetTriangles(s);
+                    var points = m.vertices;
+                    var seal = build.Invoke(null, new object[] { points, faces });
+                    var patch = (List<int>)seal.GetType().GetField("triangles", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(seal);
+                    // Independently count incidences of all original and added triangle edges.
+                    var ids = new Dictionary<Vector3Int,int>();
+                    int Id(int i)
+                    {
+                        Vector3Int key = Vector3Int.RoundToInt(points[i] * 100000f);
+                        if (!ids.TryGetValue(key, out int id)) ids[key] = id = ids.Count;
+                        return id;
+                    }
+                    var edges = new Dictionary<(int,int),(int count,int winding)>();
+                    void Edge(int a,int b)
+                    {
+                        var key = a < b ? (a,b) : (b,a);
+                        edges.TryGetValue(key,out var old);
+                        edges[key] = (old.count+1,old.winding+(a<b ? 1:-1));
+                    }
+                    var all = faces.Concat(patch).ToArray();
+                    for (int i=0;i<all.Length;i+=3)
+                    {
+                        int a=Id(all[i]), b=Id(all[i+1]), c=Id(all[i+2]);
+                        if (a==b || b==c || c==a) continue;
+                        Edge(a,b); Edge(b,c); Edge(c,a);
+                    }
+                    bad += edges.Values.Count(e => e.count != 2 || e.winding != 0);
+                    if (bad > 0)
+                        File.WriteAllLines(Path.Combine(dir, renderers[r].name + "_topology.txt"), new[] {
+                            string.Join(" ",faces), string.Join(" ",patch),
+                            string.Join(" ",points.Select(p => Vector3Int.RoundToInt(p * 100000f)).Select(p => $"{p.x},{p.y},{p.z}"))
+                        });
+                    added += patch.Count/3;
+                    foreach (int id in patch.Distinct()) seams.Add((r,id,posed[id]));
+                }
+                Expect("sealed native " + renderers[r].name, bad == 0, $"{added} closure triangles, {bad} unpaired or non-manifold edges");
+            }
+            var rotations = new Dictionary<Transform,Quaternion>();
+            try
+            {
+                foreach (var bone in renderers.SelectMany(r => r.bones).Distinct().Where(b => b))
+                {
+                    string name = bone.name;
+                    float angle = name.Contains("ForeArm") ? 70f : name.Contains("Leg") ? 45f : name.StartsWith("Spine1") ? 25f : 0f;
+                    if (angle == 0f || !name.EndsWith("_Mesh")) continue;
+                    rotations.Add(bone,bone.localRotation);
+                    bone.localRotation *= Quaternion.Euler(angle,0,0);
+                }
+                var bent = renderers.Select(SkinWorldVertices).ToArray();
+                int paired = 0;
+                float worst = 0f;
+                for (int i=0; i<seams.Count; i++)
+                    for (int j=0; j<i; j++)
+                    {
+                        var a=seams[i]; var b=seams[j];
+                        if (a.r==b.r || Vector3.Distance(a.before,b.before)>0.001f) continue;
+                        worst = Mathf.Max(worst, Vector3.Distance(bent[a.r][a.vertex],bent[b.r][b.vertex]));
+                        paired++;
+                    }
+                Expect("matching modular seams in bent pose", rotations.Count > 0 && paired > 0 && worst < 0.002f,
+                    $"{rotations.Count} bent bones, {paired} pairs, maximum {worst*1000f:0.00} mm");
+            }
+            finally { foreach (var bone in rotations) bone.Key.localRotation=bone.Value; }
+        }
+
+        private void CheckWardrobeFit(Creature c)
+        {
+            var component = c.GetComponent(ZType("ArmourBody"));
+            var originals = (Dictionary<ManikinWardrobeData, ManikinWardrobeData>)component.GetType()
+                .GetField("originals", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(component);
+            var equipped = c.manikinLocations.partLocations.Values
+                .Select(w => originals.TryGetValue(w, out var original) ? original : w).Distinct().ToArray();
+            var baseParts = (List<ManikinWardrobeData>)component.GetType()
+                .GetField("baseParts", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(component);
+            foreach (var body in baseParts)
+            {
+                if (body.occlusionIDHash == 0) continue;
+                int expectedMask = 0;
+                foreach (var wardrobe in equipped)
+                    for (int i = 0; i < wardrobe.channels.Length; i++)
+                        for (int j = 0; j < body.channels.Length; j++)
+                            if (wardrobe.channels[i] == body.channels[j])
+                            {
+                                int layer = 1 << body.layers[j];
+                                if ((wardrobe.fullyOccludedLayers[i] & layer) != 0) expectedMask = -1;
+                                if ((wardrobe.partialOccludedLayers[i] & layer) != 0) expectedMask |= wardrobe.partialOccludedMasks[i];
+                            }
+                var part = c.manikinParts.GetPartMatchingAssetGUID(body.assetPrefab.AssetGUID);
+                var materials = part.GetComponentsInChildren<SkinnedMeshRenderer>(true).SelectMany(r => r.sharedMaterials)
+                    .Where(m => m && m.HasProperty("_Bitmask")).Distinct().ToArray();
+                Expect("native skin coverage preserved", materials.All(m => m.GetFloat("_Bitmask") == (float)expectedMask),
+                    $"{body.name}: expected {expectedMask}, actual {string.Join(",", materials.Select(m => m.GetFloat("_Bitmask")))}");
+            }
+            int checkedWeights = 0, failures = 0;
+            var allParts = new List<ManikinPart>();
+            c.manikinParts.GetAllParts(allParts, true);
+            foreach (var part in allParts)
+            {
+                if (!part || part.blendShapes == null) continue;
+                var expected = new Dictionary<(SkinnedMeshRenderer, int), float>();
+                foreach (var shape in part.blendShapes)
+                    foreach (var renderer in shape.skinnedMeshRenderers)
+                        if (renderer) expected[(renderer, shape.blendShapeIndex)] = shape.blendShapeDefaultValue;
+                foreach (var wardrobe in equipped)
+                {
+                    var shape = part.blendShapes.FirstOrDefault(s => s.wardrobes.Contains(wardrobe));
+                    if (shape == null) continue;
+                    Note("wardrobe fit", $"{part.name}: {wardrobe.name}, shape {shape.blendShapeIndex}, value {shape.blendShapeValue}");
+                    foreach (var renderer in shape.skinnedMeshRenderers)
+                        if (renderer) expected[(renderer, shape.blendShapeIndex)] = shape.blendShapeValue;
+                }
+                foreach (var pair in expected)
+                {
+                    checkedWeights++;
+                    float actual = pair.Key.Item1.GetBlendShapeWeight(pair.Key.Item2);
+                    if (Mathf.Abs(actual - pair.Value) > 0.01f) failures++;
+                }
+            }
+            Expect("native clothing fit shapes preserved", failures == 0, $"{checkedWeights} weights checked, {failures} mismatches");
+        }
+
+        private void CheckBodyCap(SkinnedMeshRenderer skin, SkinnedMeshRenderer cap, HashSet<Vector3> original)
+        {
+            Vector3[] local = skin.sharedMesh.vertices;
+            Vector3[] current = SkinWorldVertices(skin);
+            Vector3[] capPoints = SkinWorldVertices(cap);
+            int total = 0, matched = 0;
+            float largestGap = 0f;
+            foreach (int i in skin.sharedMesh.triangles.Distinct())
+            {
+                if (original.Contains(local[i])) continue;
+                Vector3 p = current[i];
+                float distance = CapDistance(p, capPoints, cap.sharedMesh.triangles);
+                total++;
+                largestGap = Mathf.Max(largestGap, distance);
+                if (distance < 0.005f) matched++;
+            }
+            Expect("skin cut edge meets the cap", total > 0 && matched == total,
+                   $"{matched}/{total} seam vertices within 5 mm, largest gap {largestGap * 1000f:0.0} mm");
+        }
+
+        private static float CapDistance(Vector3 p, Vector3[] points, int[] triangles)
+        {
+            if (triangles.Length == 0) return float.PositiveInfinity;
+            float best = triangles.Min(i => (points[i]-p).sqrMagnitude);
+            if (best < 0.000025f) return Mathf.Sqrt(best);
+            float Segment(Vector3 a, Vector3 b)
+            {
+                Vector3 d = b-a;
+                return (p-a-d*(d.sqrMagnitude > 1e-14f ? Mathf.Clamp01(Vector3.Dot(p-a,d)/d.sqrMagnitude) : 0f)).sqrMagnitude;
+            }
+            for (int k = 0; k < triangles.Length; k += 3)
+            {
+                Vector3 a = points[triangles[k]], b = points[triangles[k+1]], c = points[triangles[k+2]];
+                Vector3 ab = b-a, ac = c-a, n = Vector3.Cross(ab,ac);
+                if (n.sqrMagnitude > 1e-16f)
+                {
+                    float side = Vector3.Dot(p-a,n)/n.sqrMagnitude;
+                    Vector3 q = p - n*side;
+                    if (Vector3.Dot(Vector3.Cross(ab,q-a),n) >= -1e-12f &&
+                        Vector3.Dot(Vector3.Cross(c-b,q-b),n) >= -1e-12f &&
+                        Vector3.Dot(Vector3.Cross(a-c,q-c),n) >= -1e-12f)
+                    { best = Mathf.Min(best, (p-q).sqrMagnitude); continue; }
+                }
+                best = Mathf.Min(best, Mathf.Min(Segment(a,b), Mathf.Min(Segment(b,c),Segment(c,a))));
+            }
+            return Mathf.Sqrt(best);
+        }
+
+        private static Vector3[] SkinWorldVertices(SkinnedMeshRenderer renderer)
+        {
+                Mesh mesh = renderer.sharedMesh;
+                var vertices = mesh.vertices;
+                var weights = mesh.boneWeights;
+                var bind = mesh.bindposes;
+                var bones = renderer.bones;
+                Vector3 Weighted(int bone, float weight, Vector3 p) => weight > 0f && bones[bone]
+                    ? (bones[bone].localToWorldMatrix * bind[bone]).MultiplyPoint3x4(p) * weight : Vector3.zero;
+                for (int i = 0; i < vertices.Length; i++)
+                {
+                    BoneWeight w = weights[i];
+                    Vector3 p = vertices[i];
+                    vertices[i] = Weighted(w.boneIndex0, w.weight0, p) + Weighted(w.boneIndex1, w.weight1, p) +
+                                  Weighted(w.boneIndex2, w.weight2, p) + Weighted(w.boneIndex3, w.weight3, p);
+                }
+                return vertices;
+        }
+
         private IEnumerator S_armour()
         {
             Creature c = null;
@@ -331,6 +808,290 @@ namespace ZandatsuLab
         }
 
         private IEnumerator S_rip_tear() => RipWithGrips(true, checkPiece: true);
+        private IEnumerator S_cap_l_arm() => LimbCap(RagdollPart.Type.LeftArm, 0);
+        private IEnumerator S_cap_head() => LimbCap(RagdollPart.Type.Head, 0);
+        private IEnumerator S_cap_r_arm() => LimbCap(RagdollPart.Type.RightArm, 0);
+        private IEnumerator S_cap_l_elbow() => LimbCap(RagdollPart.Type.LeftArm, 1);
+        private IEnumerator S_cap_r_elbow() => LimbCap(RagdollPart.Type.RightArm, 1);
+        private IEnumerator S_cap_l_hand() => LimbCap(RagdollPart.Type.LeftHand, 0);
+        private IEnumerator S_cap_r_hand() => LimbCap(RagdollPart.Type.RightHand, 0);
+        private IEnumerator S_cap_l_thigh() => LimbCap(RagdollPart.Type.LeftLeg, 0);
+        private IEnumerator S_cap_r_thigh() => LimbCap(RagdollPart.Type.RightLeg, 0);
+        private IEnumerator S_cap_l_knee() => LimbCap(RagdollPart.Type.LeftLeg, 1);
+        private IEnumerator S_cap_r_knee() => LimbCap(RagdollPart.Type.RightLeg, 1);
+        private IEnumerator S_cap_l_foot() => LimbCap(RagdollPart.Type.LeftFoot, 0);
+        private IEnumerator S_cap_r_foot() => LimbCap(RagdollPart.Type.RightFoot, 0);
+        private IEnumerator S_cap_armour_l_arm() => LimbCap(RagdollPart.Type.LeftArm, 0, wear: MetalChest);
+        private IEnumerator S_cap_armour_r_arm() => LimbCap(RagdollPart.Type.RightArm, 0, wear: MetalChest);
+        private IEnumerator S_cap_armour_f_l_arm() => LimbCap(RagdollPart.Type.LeftArm, 0, female: true, wear: MetalChest);
+        private IEnumerator S_cap_armour_f_r_arm() => LimbCap(RagdollPart.Type.RightArm, 0, female: true, wear: MetalChest);
+        private IEnumerator S_cap_f_l_arm() => LimbCap(RagdollPart.Type.LeftArm, 0, female: true);
+        private IEnumerator S_cap_f_r_arm() => LimbCap(RagdollPart.Type.RightArm, 0, female: true);
+        private IEnumerator S_cap_f_l_elbow() => LimbCap(RagdollPart.Type.LeftArm, 1, female: true);
+        private IEnumerator S_cap_f_r_elbow() => LimbCap(RagdollPart.Type.RightArm, 1, female: true);
+        private IEnumerator S_cap_f_l_hand() => LimbCap(RagdollPart.Type.LeftHand, 0, female: true);
+        private IEnumerator S_cap_f_r_hand() => LimbCap(RagdollPart.Type.RightHand, 0, female: true);
+        private IEnumerator S_cap_f_l_thigh() => LimbCap(RagdollPart.Type.LeftLeg, 0, female: true);
+        private IEnumerator S_cap_f_r_thigh() => LimbCap(RagdollPart.Type.RightLeg, 0, female: true);
+        private IEnumerator S_cap_f_l_knee() => LimbCap(RagdollPart.Type.LeftLeg, 1, female: true);
+        private IEnumerator S_cap_f_r_knee() => LimbCap(RagdollPart.Type.RightLeg, 1, female: true);
+        private IEnumerator S_cap_f_l_foot() => LimbCap(RagdollPart.Type.LeftFoot, 0, female: true);
+        private IEnumerator S_cap_f_r_foot() => LimbCap(RagdollPart.Type.RightFoot, 0, female: true);
+        private IEnumerator S_sword_shin_l() => LimbCap(RagdollPart.Type.LeftLeg, 1, sword: true);
+        private IEnumerator S_sword_shin_r() => LimbCap(RagdollPart.Type.RightLeg, 1, sword: true);
+        private IEnumerator S_sword_shin_f_l() => LimbCap(RagdollPart.Type.LeftLeg, 1, sword: true, female: true);
+        private IEnumerator S_sword_shin_f_r() => LimbCap(RagdollPart.Type.RightLeg, 1, sword: true, female: true);
+
+        private IEnumerator LimbCap(RagdollPart.Type type, int segment, bool sword = false, bool female = false, string wear = "ApparelCivilianChest")
+        {
+            if (current.StartsWith("plate_cap_", StringComparison.Ordinal)) wear = "full plate";
+            Set("CheesePull", false);
+            Creature c = null;
+            yield return Enemy(x => c = x, wear, creatureId: female ? "HumanFemale" : "HumanMale");
+            if (!c) yield break;
+            if (sword)
+            {
+                c.ragdoll.SetState(Ragdoll.State.Destabilized);
+                yield return new WaitForFixedUpdate();
+                Physics.SyncTransforms();
+            }
+            int Depth(RagdollPart p) { int d = 0; for (; p && p.parentPart && d < 32; p = p.parentPart) d++; return d; }
+            var parts = c.ragdoll.parts.Where(p => p && p.type == type).OrderBy(Depth).ToArray();
+            Expect("requested anatomical segment exists", segment < parts.Length, $"{type} segment {segment}, {parts.Length} matches");
+            if (segment >= parts.Length) yield break;
+            var part = parts[segment];
+            Vector3 Joint(RagdollPart p) => p.transform.TransformPoint(p.orgCharacterJointData != null ? p.orgCharacterJointData.anchor : Vector3.zero);
+            Vector3 woundAxis = Joint(part) - Joint(part.parentPart);
+            foreach (var child in c.ragdoll.parts)
+                if (child && child.parentPart == part && (Joint(child) - Joint(part)).sqrMagnitude > 0.0025f)
+                { woundAxis = Joint(child) - Joint(part); break; }
+            Vector3 woundNormal = sword ? Vector3.up : woundAxis.normalized;
+            Note("target joint", $"{part.name}, bone {part.bone?.mesh?.name}, parent {part.parentPart?.name}");
+            var originals = c.renderers.Where(r => r?.renderer && r.renderer.sharedMesh && r.renderer.name.EndsWith("LOD0"))
+                .Select(r => r.renderer).Distinct().ToDictionary(r => r, r => new HashSet<Vector3>(r.sharedMesh.vertices));
+            foreach (var body in c.GetComponentsInChildren<Rigidbody>()) body.isKinematic = true;
+            if (sword)
+            {
+                var child = c.ragdoll.parts.FirstOrDefault(p => p && p.parentPart == part);
+                Vector3 at = child ? Vector3.Lerp(part.transform.position, child.transform.position, 0.5f) : part.transform.position;
+                var collider = part.colliderGroup?.colliders?.Where(x => x && x.enabled && !x.isTrigger)
+                    .OrderByDescending(x => x.bounds.size.sqrMagnitude).FirstOrDefault();
+                if (collider) at = collider.bounds.center;
+                Note("shin collider", collider ? $"{collider.name}, active {collider.gameObject.activeInHierarchy}, layer {collider.gameObject.layer}, centre {collider.bounds.center}, size {collider.bounds.size}" : "missing enabled collider");
+                var opposite = c.ragdoll.parts.Where(p => p && p.type == (type == RagdollPart.Type.LeftLeg ? RagdollPart.Type.RightLeg : RagdollPart.Type.LeftLeg))
+                    .OrderBy(Depth).ElementAtOrDefault(segment);
+                Vector3 outward = opposite ? Vector3.ProjectOnPlane(at - opposite.transform.position, Vector3.up).normalized : c.transform.right;
+                Vector3 direction = -outward;
+                Vector3 axis = Vector3.Cross(Vector3.up, direction).normalized;
+                Item blade = null;
+                yield return SpawnItem(Sword, x => blade = x);
+                for (int attempt = 0; blade && attempt < 3 && Cuts(c) == 0; attempt++)
+                {
+                    Vector3 aim = at + direction * (attempt == 1 ? 0.04f : attempt == 2 ? -0.04f : 0f);
+                    yield return Swing(blade, aim, axis, direction, attempt == 1 ? 10f : 12f, false, stopInside: true);
+                    yield return Wait(0.4f);
+                }
+                if (blade) blade.Despawn();
+                Expect("blade struck the requested shin", LogHas("at " + part.name + " ("), LastLines("blade sweep cut", 2));
+            }
+            else
+            {
+                var scriptType = ZType("ZandatsuScript");
+                var script = ModManager.loadedMods.SelectMany(m => m.thunderScripts).First(s => s.GetType() == scriptType);
+                Vector3 pull = part.physicBody.velocity - part.parentPart.physicBody.velocity;
+                if (Vector3.Dot(woundNormal, pull) > 0.1f)
+                    woundNormal = Vector3.RotateTowards(woundNormal, pull.normalized, 15f * Mathf.Deg2Rad, 0f);
+                Note("trigger", "targeted call to the mod's actual StartTear path; grip mechanics are tested separately in rip_tear");
+                scriptType.GetMethod("StartTear", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(script, new object[] { part, c });
+            }
+            float until = Time.realtimeSinceStartup + 5f;
+            while (Cuts(c) == 0 && Time.realtimeSinceStartup < until) yield return null;
+            yield return Wait(0.2f);
+            var pieces = Pieces();
+            Expect("target limb separated", Cuts(c) > 0 && pieces.Count > 0, $"{Cuts(c)} cuts, {pieces.Count} pieces");
+            if (pieces.Count == 0) yield break;
+            foreach (var body in c.GetComponentsInChildren<Rigidbody>().Concat(pieces.SelectMany(p => p.GetComponentsInChildren<Rigidbody>())))
+                body.isKinematic = true;
+            foreach (var piece in pieces)
+            {
+                var bodies = piece.GetComponentsInChildren<Rigidbody>();
+                var moved = bodies.Select(b => b.position + c.transform.right * 2f + Vector3.up * 0.5f).ToArray();
+                for (int i = 0; i < bodies.Length; i++) bodies[i].transform.position = bodies[i].position = moved[i];
+            }
+            Physics.SyncTransforms();
+            var cap = c.GetComponentsInChildren<SkinnedMeshRenderer>().LastOrDefault(r => r.name == "Zandatsu_CreatureCap");
+            Expect("retained wound cap exists", cap, "NPC");
+            if (cap)
+            {
+                var isSkin = ZType("ArmourBody").GetMethod("IsSkinRenderer", BindingFlags.Static | BindingFlags.NonPublic);
+                foreach (var pair in originals.Where(p => (bool)isSkin.Invoke(null, new object[] { c, p.Key })))
+                    if (pair.Key && pair.Key.enabled && !pair.Key.forceRenderingOff && pair.Key.sharedMesh != null &&
+                        pair.Key.sharedMesh.vertices.Any(v => !pair.Value.Contains(v))) CheckBodyCap(pair.Key, cap, pair.Value);
+                yield return ShotRaisedCap(cap, 0, "npc_cap", c.GetComponentsInChildren<Rigidbody>());
+            }
+            foreach (var piece in pieces)
+            {
+                CheckPieceCapEdges(piece, woundNormal);
+                yield return ShotTornCap(piece);
+            }
+        }
+
+        [Serializable] private class CapGeometry { public Vector3[] vertices; public CapGroup[] groups; }
+        [Serializable] private class CapGroup { public string material; public int tag; public int[] triangles; }
+
+        private void CheckPieceCapEdges(Component piece, Vector3 woundNormal)
+        {
+            object data = piece.GetType().GetField("data").GetValue(piece);
+            Type meshType = data.GetType();
+            var origins = (IList)meshType.GetField("o").GetValue(data);
+            var subs = (List<List<int>>)meshType.GetField("subs").GetValue(data);
+            var tags = (List<int>)meshType.GetField("subTag").GetValue(data);
+            var vertices = SkinWorldVertices(piece.GetComponentInChildren<SkinnedMeshRenderer>());
+            var materials = (List<Material>)meshType.GetField("mats").GetValue(data);
+            object family = piece.GetType().GetField("family").GetValue(piece);
+            var skin = (HashSet<Material>)family.GetType().GetField("skin").GetValue(family);
+            var fill = (Material)piece.GetType().GetField("fill").GetValue(piece);
+            var dump = new CapGeometry { vertices = vertices, groups = subs.Select((t, i) => new CapGroup {
+                material = materials[i] ? materials[i].name : "null", tag = tags[i], triangles = t.ToArray() }).ToArray() };
+            File.WriteAllText(Path.Combine(dir, "piece_geometry.json"), JsonUtility.ToJson(dump));
+            var capIds = new HashSet<int>();
+            var capTriangles = new List<int>();
+            var rimIds = new HashSet<int>();
+            for (int s = 0; s < subs.Count; s++)
+                foreach (int id in subs[s])
+                    if (tags[s] < 0 && materials[s] == fill) { capIds.Add(id); capTriangles.Add(id); }
+                    else if (skin.Contains(materials[s]) && origins != null && (int)origins[id].GetType().GetField("b").GetValue(origins[id]) >= 0) rimIds.Add(id);
+            float worst = 0f;
+            var capIndices = capTriangles.ToArray();
+            foreach (int id in rimIds) worst = Mathf.Max(worst, CapDistance(vertices[id], vertices, capIndices));
+            Expect("detached native skin meets the flesh face", rimIds.Count > 0 && worst < 0.005f,
+                $"{rimIds.Count} rim vertices, largest gap {worst * 1000f:0.0} mm");
+            // Measure in the snapshot pose; a detached foot can rotate before this photograph is taken.
+            var bindVertices = (List<Vector3>)meshType.GetField("v").GetValue(data);
+            if (current.StartsWith("sword_shin", StringComparison.Ordinal))
+            {
+                int flesh = materials.FindIndex(m => m == fill);
+                if (flesh >= 0 && subs[flesh].Count > 0)
+                    woundNormal = ((List<Vector3>)meshType.GetField("n").GetValue(data))[subs[flesh][0]].normalized;
+            }
+            float spread = capIds.Count > 0 ? capIds.Max(i => Vector3.Dot(bindVertices[i], woundNormal)) - capIds.Min(i => Vector3.Dot(bindVertices[i], woundNormal)) : float.PositiveInfinity;
+            Expect("cap stays on a narrow wound surface", spread < 0.016f, $"{spread * 1000f:0.0} mm normal spread");
+        }
+
+        private IEnumerator S_tear_cold()
+        {
+            Set("CheesePull", false);
+            yield return RipWithGrips(true, checkPiece: false);
+            Expect("cheese pull disabled", !UnityEngine.Object.FindObjectOfType(ZType("TearStrands")), "after joint tear");
+            Material[] steel = Pieces().SelectMany(p => p.GetComponentsInChildren<Renderer>())
+                .SelectMany(r => r.sharedMaterials).Where(m => m && m.name == "Zandatsu_HotSteel").Distinct().ToArray();
+            var heatOf = ZType("HotSteel").GetMethod("HeatOf");
+            Expect("torn armour edges are cold", steel.Length > 0 && steel.All(m => (float)heatOf.Invoke(null, new object[] { m }) == 0f),
+                   $"{steel.Length} steel materials");
+        }
+
+        private IEnumerator S_steel_cooling()
+        {
+            Type hotSteel = ZType("HotSteel");
+            float peak = (float)hotSteel.GetMethod("PeakFor").Invoke(null, new object[] { 0f });
+            Material steel = (Material)hotSteel.GetMethod("Create").Invoke(null, new object[] { null, peak });
+            try
+            {
+                Expect("plain blade heat is faint", steel && peak > 0f && peak <= 0.15f, $"heat {peak}");
+                yield return Wait(0.55f);
+                float heat = (float)hotSteel.GetMethod("HeatOf").Invoke(null, new object[] { steel });
+                Expect("plain blade steel cooled within half a second", heat == 0f, $"heat {heat}");
+            }
+            finally { if (steel) Destroy(steel); }
+        }
+
+        private IEnumerator S_cheese_pull()
+        {
+            yield return RipWithGrips(true, checkPiece: false);
+        }
+
+        private IEnumerator S_cheese_pull_leg() => RipWithGrips(true, limbType: RagdollPart.Type.LeftLeg);
+
+        private IEnumerator CheckStrandStretch(Component strands, Creature creature)
+        {
+            const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
+            object Field(string name) => strands.GetType().GetField(name, fields).GetValue(strands);
+            var limits = (float[])Field("breakLengths");
+            var snapped = (float[])Field("snappedAt");
+            var stump = (Transform)Field("stump");
+            var stumpPoints = (Vector3[])Field("stumpPoints");
+            var anchors = (Transform[])Field("limbAnchors");
+            var limbPoints = (Vector3[])Field("limbPoints");
+            var limbBodies = strands.transform.parent.GetComponentsInChildren<Rigidbody>();
+            var bodies = creature.GetComponentsInChildren<Rigidbody>().Concat(limbBodies).Distinct().ToArray();
+            var kinematic = bodies.Select(b => b.isKinematic).ToArray();
+            float expectedMinimum = current == "cheese_pull_leg" ? 1.05f : 0.75f;
+            Expect("limb-specific tissue reach", Mathf.Abs(limits.Min() - expectedMinimum) < 0.001f,
+                $"{limits.Min():0.00}-{limits.Max():0.00} m");
+            var reachFor = strands.GetType().GetMethod("ReachFor", BindingFlags.Static | BindingFlags.NonPublic);
+            Vector2 hand = (Vector2)reachFor.Invoke(null, new object[] { RagdollPart.Type.LeftHand });
+            Vector2 foot = (Vector2)reachFor.Invoke(null, new object[] { RagdollPart.Type.RightFoot });
+            Expect("hands and feet use shorter tissue reach", hand == new Vector2(0.45f, 0.65f) && foot == hand,
+                $"hand {hand}, foot {foot}");
+            Vector3 direction = (anchors[0].TransformPoint(limbPoints[0]) - stump.TransformPoint(stumpPoints[0])).normalized;
+            if (direction.sqrMagnitude < 0.1f) direction = creature.transform.right;
+            void Gap(float distance)
+            {
+                Vector3 delta = stump.TransformPoint(stumpPoints[0]) + direction * distance - anchors[0].TransformPoint(limbPoints[0]);
+                var positions = limbBodies.Select(b => b.position + delta).ToArray();
+                for (int i = 0; i < limbBodies.Length; i++)
+                    limbBodies[i].transform.position = limbBodies[i].position = positions[i];
+                Physics.SyncTransforms();
+            }
+            try
+            {
+                foreach (var body in bodies) body.isKinematic = true;
+                Gap(limits.Min() - 0.15f);
+                yield return Wait(4f);
+                Expect("tissue survives a stationary hold beyond the old timeout", strands && snapped.All(t => t < 0f), "4 seconds below the break distance");
+                if (!strands) yield break;
+                var renderer = strands.GetComponent<MeshRenderer>();
+                Vector3 view = Vector3.Cross(direction, Vector3.up);
+                if (view.sqrMagnitude < 0.1f) view = Vector3.Cross(direction, Vector3.right);
+                yield return ShotNear("tissue_long_hold", renderer.bounds.center, Mathf.Max(1f, renderer.bounds.size.magnitude * 1.3f),
+                    (view.normalized + Vector3.up * 0.25f).normalized);
+                Gap((limits.Min() + limits.Max()) * 0.5f);
+                yield return null;
+                yield return new WaitForEndOfFrame();
+                int broken = snapped.Count(t => t >= 0f);
+                Expect("fibres break progressively at intermediate stretch", broken > 0 && broken < snapped.Length, $"{broken}/{snapped.Length} snapped");
+                yield return CheckStrandRecoil(strands);
+                Gap(limits.Max() + 0.2f);
+                yield return Wait(0.4f);
+                Expect("all fibres retract and clean up beyond the maximum distance", !strands, "after stretching past the last fibre's limit");
+            }
+            finally
+            {
+                for (int i = 0; i < bodies.Length; i++) if (bodies[i]) bodies[i].isKinematic = kinematic[i];
+            }
+        }
+
+        private IEnumerator CheckStrandRecoil(Component strands)
+        {
+            var field = strands.GetType().GetField("snappedAt", BindingFlags.Instance | BindingFlags.NonPublic);
+            var snapped = (float[])field.GetValue(strands);
+            float until = Time.time + 2.6f;
+            while (strands && snapped.All(t => t < 0f) && Time.time < until) yield return null;
+            Expect("tissue strands snap", snapped.Any(t => t >= 0f), "during the pull");
+            yield return Wait(0.3f);
+            if (!strands) yield break; // All fibres have already retracted and the mesh has been removed.
+            var vertices = strands.GetComponent<MeshFilter>().sharedMesh.vertices;
+            bool checkedTip = false, joined = true;
+            for (int i = 0; i < snapped.Length; i++)
+            {
+                if (snapped[i] < 0f || Time.time - snapped[i] < 0.26f) continue;
+                checkedTip = true;
+                int start = i * 12 * 7;
+                joined &= Vector3.Distance(vertices[start], vertices[start + 5 * 7]) < 0.001f;
+                joined &= Vector3.Distance(vertices[start + 6 * 7], vertices[start + 11 * 7]) < 0.001f;
+            }
+            Expect("broken tissue retracts to both anchors", checkedTip && joined, "tips within 1 mm of their anchors");
+        }
 
         private IEnumerator S_hair_cap() => HairCap(false);
         private IEnumerator S_hair_band() => HairCap(true);
@@ -439,6 +1200,13 @@ namespace ZandatsuLab
                 Transform seamBone = cap.bones.FirstOrDefault();
                 var rims = c.GetComponentsInChildren<SkinnedMeshRenderer>().Where(r => r != cap && r.enabled &&
                     r.sharedMesh && r.sharedMesh.name.EndsWith("(Zandatsu)") && r.bones.LastOrDefault() == seamBone).ToArray();
+                var bodyType = ZType("ArmourBody");
+                if ((bool)bodyType.GetMethod("HasBody", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { c }))
+                {
+                    // Clothing now keeps its own shell; only the underlying skin is joined to the flesh cap.
+                    var isSkin = bodyType.GetMethod("IsSkinRenderer", BindingFlags.Static | BindingFlags.NonPublic);
+                    rims = rims.Where(r => (bool)isSkin.Invoke(null, new object[] { c, r })).ToArray();
+                }
                 Expect("NPC rim and cap share their attachment", seamBone && rims.Length > 0, $"bone {seamBone}");
                 if (seamBone) CheckNpcRim(cap, rims);
                 Rigidbody[] bodies = c.ragdoll.parts.Where(p => p && p.physicBody != null && p.physicBody.rigidBody)
@@ -538,12 +1306,23 @@ namespace ZandatsuLab
         private IEnumerator S_rip_grab() => RipWithGrips(false);
         private IEnumerator S_rip_tk() => RipWithGrips(true);
 
-        private IEnumerator RipWithGrips(bool telekinesis, bool checkPiece = false)
+        private IEnumerator RipWithGrips(bool telekinesis, bool checkPiece = false, RagdollPart.Type limbType = RagdollPart.Type.LeftArm)
         {
             Creature c = null;
-            yield return Enemy(x => c = x, checkPiece ? "ApparelCivilianChest" : telekinesis ? MetalChest : null);
+            yield return Enemy(x => c = x, current.StartsWith("cheese_pull", StringComparison.Ordinal) ? null : checkPiece ? "ApparelCivilianChest" : telekinesis ? MetalChest : null);
             if (!c) yield break;
-            var arm = c.ragdoll.GetPart(RagdollPart.Type.LeftArm);
+            var bodyType = ZType("ArmourBody");
+            bool bodyReady = (bool)bodyType.GetMethod("HasBody", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { c });
+            Note("body availability", $"ready {bodyReady}; original {string.Join(",", c.orgWardrobeLocations.wardrobe.Select(w => w ? w.name : "null"))}; equipped {string.Join(",", c.manikinLocations.partLocations.Values.Where(w => w).Select(w => w.name).Distinct())}");
+            if (!telekinesis)
+            {
+                // Remove the NPC's own weapon and shield from the forced mock-controller pull, so their collisions
+                // do not turn a grip/tear test into an unrelated lethal blow.
+                var held = new[] { c.handLeft?.grabbedHandle?.item, c.handRight?.grabbedHandle?.item }.Where(x => x).Distinct().ToArray();
+                c.handLeft?.TryRelease(); c.handRight?.TryRelease();
+                foreach (var item in held) item.Despawn();
+            }
+            var arm = c.ragdoll.GetPart(limbType);
             var torso = c.ragdoll.GetPart(RagdollPart.Type.Torso);
             Handle armGrip = c.ragdoll.parts.Where(p => p && (p == arm || p.parentPart == arm))
                               .SelectMany(p => p.handles).FirstOrDefault(h => h && h.data != null);
@@ -562,6 +1341,14 @@ namespace ZandatsuLab
             bool leftPressed = left.playerHand.controlHand.gripPressed, rightPressed = right.playerHand.controlHand.gripPressed;
             bool torsoKinematic = torso.physicBody.isKinematic;
             PlayerHand.StuckBehaviour stuckBehaviour = PlayerHand.stuckBehaviour;
+            Component stretchToCheck = null;
+            var mockAnchors = new Dictionary<ConfigurableJoint, Vector3>();
+            void SaveAnchors(RagdollHand hand)
+            {
+                if (hand.gripInfo == null) return;
+                foreach (var joint in new[] { hand.gripInfo.joint, hand.gripInfo.playerJoint })
+                    if (joint && !mockAnchors.ContainsKey(joint)) mockAnchors.Add(joint,joint.anchor);
+            }
             try
             {
                 if (telekinesis)
@@ -586,6 +1373,7 @@ namespace ZandatsuLab
                     right.playerHand.controlHand.gripPressed = true;
                     left.Grab(torsoGrip, false);
                     right.Grab(armGrip, false);
+                    SaveAnchors(left); SaveAnchors(right);
                     // Match the test controllers' joint anchors to the held parts before adding the scripted pull.
                     AlignMockGrip(left);
                     AlignMockGrip(right);
@@ -593,28 +1381,56 @@ namespace ZandatsuLab
                     Expect("two native hand grips", left.grabbedHandle == torsoGrip && right.grabbedHandle == armGrip, "torso and arm");
                 }
                 yield return null;
-                float force = arm.characterJoint ? arm.characterJoint.breakForce : float.PositiveInfinity;
+                // A handle may arm its own joint or its parent's (for example a locked forearm with a tearable shoulder).
+                var grippedPart = ((HandleRagdoll)armGrip).ragdollPart;
+                var tearJoint = new[] { grippedPart, grippedPart.parentPart }
+                    .FirstOrDefault(p => p && p.characterJoint && !float.IsInfinity(p.characterJoint.breakForce));
+                float force = tearJoint ? tearJoint.characterJoint.breakForce : float.PositiveInfinity;
                 Expect("joint armed with vanilla dismemberment disabled", !Damager.dismembermentEnabled && !float.IsInfinity(force),
                        $"{force:0} N, vanilla flag {Damager.dismembermentEnabled}");
-                RagdollPart other = c.ragdoll.GetPart(RagdollPart.Type.RightArm);
-                Expect("other arm stayed protected", other.characterJoint && float.IsInfinity(other.characterJoint.breakForce), "opposite shoulder");
+                RagdollPart other = c.ragdoll.GetPart(limbType == RagdollPart.Type.LeftLeg ? RagdollPart.Type.RightLeg : RagdollPart.Type.RightArm);
+                Expect("opposite limb stayed protected", other.characterJoint && float.IsInfinity(other.characterJoint.breakForce), "untargeted joint");
                 if (telekinesis && !checkPiece)
                 {
                     if (!rightTk.TryRelease()) rightTk.TryRelease();
                     yield return null;
-                    Expect("releasing the grip restores joint strength", arm.characterJoint && float.IsInfinity(arm.characterJoint.breakForce), "one grip remains");
+                    Expect("releasing the grip restores joint strength", tearJoint && tearJoint.characterJoint && float.IsInfinity(tearJoint.characterJoint.breakForce), "one grip remains");
                     rightTk.targetHandle = armGrip;
                     Expect("arm can be gripped again", rightTk.TryCatch(), "second attempt");
                     yield return null;
                 }
                 yield return PullArm(arm, torso);
-                yield return Wait(0.6f);
+                if (current.StartsWith("cheese_pull", StringComparison.Ordinal))
+                {
+                    Component strands = null;
+                    float until = Time.time + 1f;
+                    while (!strands && Time.time < until)
+                    {
+                        strands = UnityEngine.Object.FindObjectOfType(ZType("TearStrands")) as Component;
+                        yield return null;
+                    }
+                    Expect("tissue strands spawned", strands && strands.GetComponent<MeshRenderer>().sharedMaterial, "on the detached limb");
+                    if (strands)
+                    {
+                        var mesh = strands.GetComponent<MeshFilter>().sharedMesh;
+                        Expect("tissue mesh is finite", mesh.vertices.All(v => !float.IsNaN(v.x) && !float.IsNaN(v.y) && !float.IsNaN(v.z)), $"{mesh.vertexCount} vertices");
+                        stretchToCheck = strands;
+                    }
+                }
+                if (!stretchToCheck) yield return Wait(0.6f);
                 Handle held = telekinesis ? rightTk.catchedHandle : right.grabbedHandle;
                 Expect("grip transferred to detached limb", held && held.GetComponentInParent(ZType("TornLimb")), $"held {held}");
                 Expect("enemy still alive", c && !c.isKilled && Cuts(c) == 1, $"cuts {Cuts(c)}, health {(c ? c.currentHealth : 0):0.0}");
+                if (stretchToCheck)
+                {
+                    if (!rightTk.TryRelease()) rightTk.TryRelease();
+                    if (!leftTk.TryRelease()) leftTk.TryRelease();
+                    yield return CheckStrandStretch(stretchToCheck, c);
+                }
             }
             finally
             {
+                foreach (var pair in mockAnchors) if (pair.Key) pair.Key.anchor = pair.Value;
                 if (telekinesis)
                 {
                     if (!rightTk.TryRelease()) rightTk.TryRelease();
@@ -822,6 +1638,180 @@ namespace ZandatsuLab
         private IEnumerator S_prop_apple() => Prop("FoodApple", "Fruit");   // compressed: read through the capture shader
         private IEnumerator S_prop_stool() => Prop("Stool2", "Wood");
         private IEnumerator S_prop_rock() => Prop("Rock_Boulder_01", "Stone");
+
+        private IEnumerator S_concave_cap()
+        {
+            // A U-shaped solid has a 700 cm2 section. Its convex hull is 900 cm2 and covers the notch.
+            Type meshType = ZType("MeshData");
+            object source = Activator.CreateInstance(meshType, 32, false);
+            var addVertex = meshType.GetMethod("AddVertex", new[] { typeof(Vector3), typeof(Vector3), typeof(Vector4), typeof(Vector2), typeof(BoneWeight) });
+            var outline = new[] { new Vector2(0, 0), new Vector2(3, 0), new Vector2(3, 3), new Vector2(2, 3),
+                                  new Vector2(2, 1), new Vector2(1, 1), new Vector2(1, 3), new Vector2(0, 3) };
+            foreach (float y in new[] { -0.1f, 0.1f })
+                foreach (Vector2 p in outline)
+                    addVertex.Invoke(source, new object[] { new Vector3(p.x * 0.1f, y, p.y * 0.1f), Vector3.up,
+                        new Vector4(1, 0, 0, 1), Vector2.zero, new BoneWeight { weight0 = 1f } });
+            var triangles = new List<int>();
+            for (int i = 0; i < outline.Length; i++)
+            {
+                int j = (i + 1) % outline.Length;
+                triangles.AddRange(new[] { i, j + 8, j, i, i + 8, j + 8 });
+            }
+            int[] top = { 0, 1, 4, 0, 4, 5, 1, 2, 3, 1, 3, 4, 0, 5, 6, 0, 6, 7 };
+            for (int i = 0; i < top.Length; i += 3)
+                triangles.AddRange(new[] { top[i], top[i + 1], top[i + 2], top[i] + 8, top[i + 2] + 8, top[i + 1] + 8 });
+            meshType.GetMethod("AddTriangles").Invoke(source, new object[] { null, null, triangles, -1 });
+            var cap = new Material(Shader.Find("Hidden/InternalErrorShader"));
+            var slice = ZType("MeshSlicer").GetMethod("Slice");
+            var rented = new List<object>();
+            try
+            {
+                object[] Cut(object mesh, float y)
+                {
+                    var args = slice.GetParameters().Select(p => p.HasDefaultValue ? p.DefaultValue : null).ToArray();
+                    args[0] = mesh; args[1] = Vector3.up * y; args[2] = Vector3.up; args[3] = cap;
+                    args[Array.FindIndex(slice.GetParameters(), p => p.Name == "holes")] = true;
+                    Expect("concave solid cut", (bool)slice.Invoke(null, args), $"plane y={y}");
+                    rented.Add(args[4]); rented.Add(args[5]);
+                    return new[] { args[4], args[5] };
+                }
+                void Check(object mesh, float y)
+                {
+                    var vertices = (List<Vector3>)meshType.GetField("v").GetValue(mesh);
+                    var materials = (List<Material>)meshType.GetField("mats").GetValue(mesh);
+                    var subs = (List<List<int>>)meshType.GetField("subs").GetValue(mesh);
+                    float area = 0f;
+                    for (int s = 0; s < subs.Count; s++)
+                    {
+                        if (materials[s] != cap) continue;
+                        for (int i = 0; i < subs[s].Count; i += 3)
+                        {
+                            Vector3 a = vertices[subs[s][i]], b = vertices[subs[s][i + 1]], c = vertices[subs[s][i + 2]];
+                            if (Mathf.Abs(a.y - y) > 0.005f) continue;
+                            area += Vector3.Cross(b - a, c - a).magnitude * 0.5f;
+                        }
+                    }
+                    Expect("cap preserves the notch and closes the section", Mathf.Abs(area - 0.07f) < 0.00001f, $"area {area:0.00000} m2, expected 0.07000");
+                }
+                object[] halves = Cut(source, 0f);
+                foreach (object half in halves) Check(half, 0f);
+                foreach (object half in Cut(halves[0], 0.05f)) Check(half, 0.05f);
+            }
+            finally
+            {
+                foreach (object mesh in rented) if (mesh != null) meshType.GetMethod("Return").Invoke(null, new[] { mesh });
+                Destroy(cap);
+            }
+            yield break;
+        }
+
+        private IEnumerator S_clothed_section() => ClothedSection(false);
+        private IEnumerator S_clothed_crossing() => ClothedSection(true);
+        private IEnumerator S_plate_gap() => ClothedSection(false, plateGap: true);
+
+        private IEnumerator ClothedSection(bool crossing, bool plateGap = false)
+        {
+            Type meshType = ZType("MeshData");
+            object source = Activator.CreateInstance(meshType, 32, false);
+            var addVertex = meshType.GetMethod("AddVertex", new[] { typeof(Vector3), typeof(Vector3), typeof(Vector4), typeof(Vector2), typeof(BoneWeight) });
+            var shader = Shader.Find("Hidden/InternalErrorShader");
+            var skin = new Material(shader); var cloth = new Material(shader);
+            var flesh = new Material(shader); var steel = new Material(shader);
+            var rented = new List<object>();
+            try
+            {
+                int offset = 0;
+                foreach (var layer in new[] { (0.1f, cloth), (0.06f, skin) })
+                {
+                    foreach (float y in new[] { -0.1f, 0.1f })
+                        foreach (var xz in new[] { new Vector2(-1,-1), new Vector2(1,-1), new Vector2(1,1), new Vector2(-1,1) })
+                        {
+                            bool plateLayer = plateGap && layer.Item2 == cloth;
+                            float x = plateLayer ? 0.11f + xz.x * 0.005f : xz.x * layer.Item1;
+                            if (crossing && layer.Item2 == skin) x += 0.07f;
+                            addVertex.Invoke(source, new object[] { new Vector3(x, y, xz.y * layer.Item1),
+                                Vector3.up, new Vector4(1,0,0,1), Vector2.zero, new BoneWeight { weight0 = 1f } });
+                        }
+                    var triangles = new List<int>();
+                    for (int i = 0; i < 4; i++)
+                    {
+                        int j = (i + 1) % 4;
+                        triangles.AddRange(new[] { offset+i, offset+j+4, offset+j, offset+i, offset+i+4, offset+j+4 });
+                    }
+                    meshType.GetMethod("AddTriangles").Invoke(source, new object[] { layer.Item2, null, triangles, -1 });
+                    offset += 8;
+                }
+                var slice = ZType("MeshSlicer").GetMethod("SliceWithSkin", BindingFlags.Static | BindingFlags.NonPublic);
+                object[] Cut(object mesh, float height, bool perpendicular = false)
+                {
+                    var parameters = slice.GetParameters();
+                    var args = parameters.Select(p => p.HasDefaultValue ? p.DefaultValue : null).ToArray();
+                    args[0] = mesh; args[2] = perpendicular ? Vector3.right : Vector3.up;
+                    args[1] = (Vector3)args[2] * height; args[3] = flesh;
+                    args[Array.FindIndex(parameters, p => p.Name == "skinMaterials")] = new HashSet<Material> { skin };
+                    args[Array.FindIndex(parameters, p => p.Name == "skinBodies")] = new HashSet<int> { 0 };
+                    if (plateGap)
+                    {
+                        args[Array.FindIndex(parameters, p => p.Name == "metal")] = new HashSet<Material> { cloth };
+                        args[Array.FindIndex(parameters, p => p.Name == "steel")] = steel;
+                    }
+                    Expect("layered section cut", (bool)slice.Invoke(null, args), $"y={height}");
+                    rented.Add(args[4]); rented.Add(args[5]);
+                    return new[] { args[4], args[5] };
+                }
+                void Check(object mesh, float height, bool perpendicular = false)
+                {
+                    var vertices = (List<Vector3>)meshType.GetField("v").GetValue(mesh);
+                    var materials = (List<Material>)meshType.GetField("mats").GetValue(mesh);
+                    var subs = (List<List<int>>)meshType.GetField("subs").GetValue(mesh);
+                    float fleshArea = 0f;
+                    bool plateGapCovered = false;
+                    bool extendsPastSkin = false;
+                    for (int s = 0; s < subs.Count; s++)
+                        if (materials[s] == flesh)
+                            for (int i = 0; i < subs[s].Count; i += 3)
+                            {
+                                Vector3 a = vertices[subs[s][i]], b = vertices[subs[s][i+1]], c = vertices[subs[s][i+2]];
+                                float Distance(Vector3 p) => perpendicular ? Mathf.Abs(p.x) : Mathf.Abs(p.y - height);
+                                if (Distance(a) > 0.001f || Distance(b) > 0.001f || Distance(c) > 0.001f) continue;
+                                fleshArea += Vector3.Cross(b-a,c-a).magnitude * 0.5f;
+                                if (plateGap)
+                                {
+                                    Vector3 sample = new Vector3(0.081f, height, 0.001f);
+                                    if (CapDistance(sample, new[] { a, b, c }, new[] { 0, 1, 2 }) < 0.0001f) plateGapCovered = true;
+                                    if (Mathf.Max(a.x, b.x, c.x) > 0.0601f || Mathf.Min(a.x, b.x, c.x) < -0.0601f)
+                                        extendsPastSkin = true;
+                                }
+                            }
+                    if (plateGap)
+                    {
+                        Expect("gap between flesh and plate stays empty", !plateGapCovered && !extendsPastSkin, $"{fleshArea:0.00000} m2");
+                        Expect("separate steel edge", materials.Contains(steel), "cut through the plate");
+                    }
+                    float expectedFlesh = perpendicular ? 0.012f : 0.0144f;
+                    Expect("single flesh cap covers the section", Mathf.Abs(fleshArea - expectedFlesh) < 0.00001f,
+                        $"{fleshArea:0.00000} m2, expected {expectedFlesh:0.00000}");
+                }
+                var halves = Cut(source, 0f);
+                foreach (var half in halves) Check(half, 0f);
+                if (plateGap)
+                    foreach (var half in Cut(source, 0.11f, true))
+                    {
+                        var mats = (List<Material>)meshType.GetField("mats").GetValue(half);
+                        Expect("blade through plate alone leaves only a steel edge", mats.Contains(steel) && !mats.Contains(flesh), "body outside cut plane");
+                    }
+                if (!plateGap)
+                    foreach (var half in Cut(halves[0], 0.05f)) Check(half, 0.05f);
+                if (!crossing && !plateGap)
+                    foreach (var half in Cut(halves[0], 0f, true)) Check(half, 0f, true);
+            }
+            finally
+            {
+                foreach (object mesh in rented) if (mesh != null) meshType.GetMethod("Return").Invoke(null, new[] { mesh });
+                Destroy(skin); Destroy(cloth); Destroy(flesh); Destroy(steel);
+            }
+            yield break;
+        }
         private IEnumerator S_prop_skull() => Prop("SkeletonSkull", "Bone");
         private IEnumerator S_prop_cushion() => Prop("Stool_KharTib_Cushion", "Fabric");
         private IEnumerator S_prop_mug() => Prop("Mug1", "Metal");
@@ -2569,15 +3559,31 @@ namespace ZandatsuLab
             if (reused) { reusedNow = true; reusedFrom = before; }
             if (wear != null)
             {
-                ItemData item = Catalog.GetData<ItemData>(wear);
-                if (item != null)
+                bool fullPlate = wear == "full plate";
+                var clothes = fullPlate ? new[] { MetalChest, "ApparelOfficerBoots", "ApparelOfficerHandL", "ApparelOfficerHandR",
+                    "ApparelOfficerHelmet", "ApparelOfficerLegs", "ApparelOfficerShoulder1R" }.Select(id => Catalog.GetData<ItemData>(id)).ToArray()
+                    : new[] { Catalog.GetData<ItemData>(wear) };
+                if (fullPlate)
+                    while (!c.manikinParts.IsDoneLoading() && Time.realtimeSinceStartup - t0 < 15f) yield return null;
+                foreach (ItemData item in clothes)
                 {
+                    if (item == null) { Note("warning", "no item " + wear); continue; }
                     // As the game equips an outfit: in the creature's container, worn (Zandatsu finds metal armour by the worn contents).
                     var content = new ItemContent(item, new ContentStateWorn());
                     c.container.AddContent(content);
-                    c.equipment.EquipWardrobe(content, true);
+                    c.equipment.EquipWardrobe(content, !fullPlate);
                 }
-                else Note("warning", "no item " + wear);
+                if (fullPlate)
+                {
+                    c.equipment.UpdateParts();
+                    // Reproduce the timing of a freshly spawned NPC: run the restore pass while
+                    // the equipment system is still loading its wardrobe assets.
+                    Expect("plate wardrobe is still loading", !c.manikinParts.IsDoneLoading(), c.name);
+                    var body = c.GetComponent(ZType("ArmourBody"));
+                    body.GetType().GetField("nextCheck", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(body, 0f);
+                    body.GetType().GetField("dirty", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(body, true);
+                    body.GetType().GetMethod("Update", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(body, null);
+                }
             }
             yield return Wait(3f);
             if (!brain && c.brain) c.brain.enabled = false;   // stands still: the swings are aimed at where he is
@@ -3268,12 +4274,15 @@ namespace ZandatsuLab
             yield return ShotRaisedCap(renderer, submesh, "torn_cap", limb.GetComponentsInChildren<Rigidbody>());
         }
 
-        private IEnumerator ShotRaisedCap(SkinnedMeshRenderer renderer, int submesh, string name, Rigidbody[] bodies)
+        private IEnumerator ShotRaisedCap(SkinnedMeshRenderer renderer, int submesh, string name, Rigidbody[] bodies, int[] face = null)
         {
             var positions = bodies.Select(body => body.position).ToArray();
             var kinematic = bodies.Select(body => body.isKinematic).ToArray();
+            var items = FindObjectsOfType<Renderer>()
+                .Where(r => r && !r.forceRenderingOff && r.GetComponentInParent<Item>()).ToArray();
             try
             {
+                foreach (var item in items) item.forceRenderingOff = true;
                 for (int i = 0; i < bodies.Length; i++)
                 {
                     bodies[i].isKinematic = true;
@@ -3281,10 +4290,24 @@ namespace ZandatsuLab
                 }
                 Physics.SyncTransforms();
                 yield return new WaitForEndOfFrame();
-                yield return ShotSkinnedCap(renderer, submesh, name);
+                yield return ShotSkinnedCap(renderer, submesh, name, face);
+                if (name == "body_cap")
+                {
+                    var hidden = FindObjectsOfType<Renderer>().Where(r => r != renderer && !r.forceRenderingOff).ToArray();
+                    try
+                    {
+                        foreach (var r in hidden) r.forceRenderingOff = true;
+                        yield return ShotSkinnedCap(renderer, submesh, name + "_surface");
+                    }
+                    finally
+                    {
+                        foreach (var r in hidden) if (r) r.forceRenderingOff = false;
+                    }
+                }
             }
             finally
             {
+                foreach (var item in items) if (item) item.forceRenderingOff = false;
                 for (int i = 0; i < bodies.Length; i++)
                 {
                     if (!bodies[i]) continue;
@@ -3294,27 +4317,13 @@ namespace ZandatsuLab
             }
         }
 
-        private IEnumerator ShotSkinnedCap(SkinnedMeshRenderer renderer, int submesh, string name)
+        private IEnumerator ShotSkinnedCap(SkinnedMeshRenderer renderer, int submesh, string name, int[] face = null)
         {
             var mesh = new Mesh();
             try
             {
-                Vector3[] vertices;
-                int[] indices;
-                if (name == "npc_cap")
-                {
-                    // The NPC cap is rigidly skinned to the same bone as the rim. Sample it in world coordinates.
-                    Mesh cap = renderer.sharedMesh;
-                    Matrix4x4 pose = renderer.bones[0].localToWorldMatrix * cap.bindposes[0];
-                    vertices = cap.vertices.Select(pose.MultiplyPoint3x4).ToArray();
-                    indices = cap.GetTriangles(submesh);
-                }
-                else
-                {
-                    renderer.BakeMesh(mesh);
-                    vertices = mesh.vertices.Select(renderer.transform.TransformPoint).ToArray();
-                    indices = mesh.GetTriangles(submesh);
-                }
+                Vector3[] vertices = SkinWorldVertices(renderer);
+                int[] indices = face ?? renderer.sharedMesh.GetTriangles(submesh);
                 Vector3 normal = Vector3.zero, center = Vector3.zero;
                 float area = 0f;
                 for (int i = 0; i < indices.Length; i += 3)
@@ -3331,8 +4340,10 @@ namespace ZandatsuLab
                     Vector3 point = center / area;
                     Vector3 facing = normal.normalized;
                     Vector3 side = Vector3.Cross(facing, Mathf.Abs(facing.y) < 0.9f ? Vector3.up : Vector3.right).normalized;
-                    yield return ShotNear(name, point, 0.33f, facing);
-                    yield return ShotNear(name + "_edge", point, 0.33f, (facing + side * 0.9f).normalized);
+                    float radius = indices.Max(i => Vector3.Distance(vertices[i], point));
+                    float distance = Mathf.Max(0.33f, radius / Mathf.Tan(25f * Mathf.Deg2Rad) * 1.15f);
+                    yield return ShotNear(name, point, distance, facing);
+                    yield return ShotNear(name + "_edge", point, distance, (facing + side * 0.9f).normalized);
                 }
             }
             finally
